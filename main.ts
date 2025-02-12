@@ -1,4 +1,4 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, requestUrl } from 'obsidian';
+import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, requestUrl,Stat } from 'obsidian';
 
 // Remember to rename these classes and interfaces!
 
@@ -15,14 +15,179 @@ const DEFAULT_SETTINGS: MyPluginSettings = {
 export default class MyPlugin extends Plugin {
 	settings: MyPluginSettings;
 
-	// 语雀 Token
-	yuqueToken: string = '8pWNuBSOTMYIQe7R5E8hVs8ngb0frjeJUEd4TmOO';
+	yuqueToken: string = '';
 
-	
+	// 从 URL 中提取 book_id 和 slug
+	extractParts(url: string): { book_id: string; slug: string } | null {
+		// 确保 URL 以 https://www.yuque.com/ 开头
+		if (!url.startsWith("https://www.yuque.com/")) {
+			return null;
+		}
 
-	async putDoc(book_id: string, slug: string, content: string) {
+		// 去掉前缀部分
+		const remaining = url.slice("https://www.yuque.com/".length);
 
+		// 按 '/' 分割字符串
+		const parts = remaining.split("/");
+
+		// 提取 weepwood/test 和 string
+		if (parts.length >= 2) {
+			const book_id = `${parts[0]}/${parts[1]}`; // weepwood/test
+			const slug = parts[2]; // string
+			console.log(book_id, slug);
+			return { book_id, slug };
+		}
+
+		return null;
+	}
+
+	async onload() {
+		await this.loadSettings();
+		console.log('Slug Plugin loaded');
+
+		// 语雀 Token
+		this.yuqueToken = this.settings.mySetting;
+
+		// 添加一个状态栏图标
+		// const statusBarItem = this.addStatusBarItem();
+		// statusBarItem.setText('Get Slug');
+		// statusBarItem.addEventListener('click', async () => {
+		// 	new Notice('This is a notice weepwood!');
+		// 	await this.handleSlugAction();
+		// });
+
+		// This creates an icon in the left ribbon.
+		// 上传到语雀
+		const ribbonIconEl = this.addRibbonIcon('cloud-upload', 'Upload Yuque', (evt: MouseEvent) => {
+			// Called when the user clicks the icon.
+			this.handleSlugAction();
+		});
+
+		// 从语雀下载
+		const ribbonIconEl2 = this.addRibbonIcon('cloud-download', 'Download Yuque', async (evt: MouseEvent) => {
+			// Called when the user clicks the icon.
+			const activeFile = this.app.workspace.getActiveFile();
+			if (activeFile) {
+				// 获取本地文件的更新时间
+				const local_mtime = await this.getFileMtime(activeFile);
+				
+				// 获取语雀文档的更新时间
+				const yuque_link = await this.getYuqueLinkFromYaml(activeFile);
+				if (yuque_link) {
+					const parts = this.extractParts(yuque_link);
+					if (parts) {
+						const { book_id, slug } = parts;
+						const yuque_mtime = await this.getDocMtime(book_id, slug);
+						console.log("本地端时间: " + local_mtime);
+						console.log("语雀端时间: " + yuque_mtime);
+						new Notice(`本地端时间: ${local_mtime}\n语雀端时间: ${yuque_mtime}`);
+
+						// 如果本地文件的更新时间晚于语雀文档的更新时间，则下载语雀文档并提示用户是否覆盖本地文件
+						if (local_mtime < yuque_mtime) {
+							new Notice('语雀文档存在新版本是否更新');
+							// 下载语雀文档
+							// this.getDoc(book_id, slug);
+						}
+						else if (local_mtime == yuque_mtime) {
+							new Notice('无需更新');
+							// 下载语雀文档
+							// this.getDoc(book_id, slug);
+						}						
+						else {
+							new Notice('本地文档已是最新版本是否上传');
+						}
+					} else {
+						new Notice('Invalid Yuque link');
+					}
+				} else {
+					new Notice('No Yuque link found');
+				}
+
+
+
+			} else {
+				new Notice('没有活动文件');
+			}
+		});
+
+		// Perform additional things with the ribbon
+		ribbonIconEl.addClass('my-plugin-ribbon-class');
+
+		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
+		// const statusBarItemEl = this.addStatusBarItem();
+		// statusBarItemEl.setText('Status Bar Text');
+
+		// This adds a simple command that can be triggered anywhere
+		// this.addCommand({
+		// 	id: 'open-sample-modal-simple',
+		// 	name: 'Open sample modal (simple)',
+		// 	callback: () => {
+		// 		new SampleModal(this.app).open();
+		// 	}
+		// });
+
+		// This adds an editor command that can perform some operation on the current editor instance
+		// this.addCommand({
+		// 	id: 'sample-editor-command',
+		// 	name: 'Sample editor command',
+		// 	editorCallback: (editor: Editor, view: MarkdownView) => {
+		// 		console.log(editor.getSelection());
+		// 		editor.replaceSelection('Sample Editor Command');
+		// 	}
+		// });
+
+		// This adds a complex command that can check whether the current state of the app allows execution of the command
+		// this.addCommand({
+		// 	id: 'open-sample-modal-complex',
+		// 	name: 'Open sample modal (complex)',
+		// 	checkCallback: (checking: boolean) => {
+		// 		// Conditions to check
+		// 		const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
+		// 		if (markdownView) {
+		// 			// If checking is true, we're simply "checking" if the command can be run.
+		// 			// If checking is false, then we want to actually perform the operation.
+		// 			if (!checking) {
+		// 				new SampleModal(this.app).open();
+		// 			}
+
+		// 			// This command will only show up in Command Palette when the check function returns true
+		// 			return true;
+		// 		}
+		// 	}
+		// });
+
+		// This adds a settings tab so the user can configure various aspects of the plugin
+		this.addSettingTab(new SampleSettingTab(this.app, this));
+
+		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
+		// Using this function will automatically remove the event listener when this plugin is disabled.
+		// this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
+		// 	console.log('click', evt);
+		// });
+
+		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
+		// this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
+	}
+
+	// 获取文件的更新时间
+	// 修改 getFileMtime 方法，使其接收 TFile 而不是 Stat
+	async getFileMtime(file: TFile): Promise<string> {
+		const stat = await this.app.vault.adapter.stat(file.path);
+		if (!stat) {
+			console.error('无法获取文件状态:', file.path);
+			return '未知';
+		}
+		const mtime = stat.mtime;
+		const date = new Date(mtime);
+		return date.toLocaleString(); // 转换为本地日期时间格式
+	}
+
+
+	// 上传到语雀
+	async putDoc(book_id: string, slug: string, content: string, fileName: string) {
+		console.log(this.yuqueToken);
 		const body = {
+			title: fileName,
 			public: "0",
 			format: "markdown",
 			body: content
@@ -34,118 +199,62 @@ export default class MyPlugin extends Plugin {
 			headers: {
 				'Content-Type': 'application/json',
 				'X-Auth-Token': this.yuqueToken,
-				'Origin': 'https://www.yuque.com',
-				'Referer': 'https://www.yuque.com/',
-				'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/}'
 			},
 			body: JSON.stringify(body)
-		}).then((response) => { 
+		}).then((response) => {
 			console.log(response);
 			new Notice('上传成功');
-		}).catch((error) => { });
-
+		}).catch((error) => {
+			console.error(error);
+			new Notice('上传失败');
+		});
 	}
 
-	async onload() {
-		await this.loadSettings();
-		console.log('Slug Plugin loaded');
-
-		// 添加一个状态栏图标
-		const statusBarItem = this.addStatusBarItem();
-		statusBarItem.setText('Get Slug');
-		statusBarItem.addEventListener('click', async () => {
-			new Notice('This is a notice weepwood!');
-			await this.handleSlugAction();
-		});
-
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice weepwood!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
-
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
+	// 获取语雀文档的更新时间
+	async getDocMtime(book_id: string, slug: string): Promise<string> {
+		try {
+			const response = await requestUrl({
+				url: `https://www.yuque.com/api/v2/repos/${book_id}/docs/${slug}`,
+				method: 'GET',
+				headers: {
+					'Content-Type': 'application/json',
+					'X-Auth-Token': this.yuqueToken,
 				}
-			}
-		});
+			});
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
+			console.log(response);
+			const date = new Date(response.json.data.updated_at);
+			new Notice('获取成功');
+			return date.toLocaleString();
+		} catch (error) {
+			console.error(error);
+			new Notice('获取失败');
+			return '未知';
+		}
 	}
+
 
 	// 处理点击事件，获取 slug 并显示消息
 	async handleSlugAction() {
 		const activeFile = this.app.workspace.getActiveFile();
 		if (activeFile) {
-			const slug = await this.getSlugFromYaml(activeFile);
-			const bookId = await this.getBookIdFromYaml(activeFile);
-			const content =await this.getMarkdownContent(activeFile);
-			if (bookId) {
-				console.log(`Book ID found: ${bookId}`);
-				this.displayMessage(`Book ID: ${bookId}`);
-			} else {
-				console.log('No book ID found in YAML frontmatter');
-				this.displayMessage('No book ID found in YAML frontmatter');
-			}
+			const yuque_link = await this.getYuqueLinkFromYaml(activeFile);
+			const content = await this.getMarkdownContent(activeFile);
+			const fileName = await this.getFileName(activeFile);
 
-			if (slug) {
-				console.log(`Slug found: ${slug}`);
-				this.displayMessage(`Slug: ${slug}`);
-			} else {
-				console.log('No slug found in YAML frontmatter');
-				this.displayMessage('No slug found in YAML frontmatter');
-			}
-			if (bookId && slug && content) {
-				this.putDoc(bookId, slug, content);
-			}
+			console.log(yuque_link);
 
+			if (yuque_link) {
+				const parts = this.extractParts(yuque_link);
+				if (parts) {
+					const { book_id, slug } = parts;
+					this.putDoc(book_id, slug, content, fileName);
+				} else {
+					this.displayMessage('Invalid Yuque link');
+				}
+			} else {
+				this.displayMessage('No Yuque link found');
+			}
 		} else {
 			this.displayMessage('No active file');
 		}
@@ -161,9 +270,13 @@ export default class MyPlugin extends Plugin {
 		const fileContent = await this.app.vault.read(file);
 		const yaml = this.parseYamlFrontmatter(fileContent);
 		const content = fileContent.replace(/^---\s*([\s\S]*?)\s*---/, '');
-		console.log(content);
-		new Notice(content);
+		console.log("MarkDown: "+content);
 		return content;
+	}
+
+	// 获取文件名称
+	async getFileName(file: TFile): Promise<string> {
+		return file.basename;
 	}
 
 	// 从文件的 YAML 前置元数据中获取 slug 属性
@@ -178,6 +291,13 @@ export default class MyPlugin extends Plugin {
 		const fileContent = await this.app.vault.read(file);
 		const yaml = this.parseYamlFrontmatter(fileContent);
 		return yaml['book_id'] || null;
+	}
+
+	// 从文件的 YAML 前置元数据中获取 yuque_link 属性
+	async getYuqueLinkFromYaml(file: TFile): Promise<string | null> {
+		const fileContent = await this.app.vault.read(file);
+		const yaml = this.parseYamlFrontmatter(fileContent);
+		return yaml['yuque_link'] || null;
 	}
 
 	// 解析 YAML 前置元数据
@@ -256,14 +376,18 @@ class SampleSettingTab extends PluginSettingTab {
 		containerEl.empty();
 
 		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
+			.setName('Yuque Token')
+			.setDesc('https://www.yuque.com/settings/tokens')
 			.addText(text => text
 				.setPlaceholder('Enter your secret')
 				.setValue(this.plugin.settings.mySetting)
 				.onChange(async (value) => {
 					this.plugin.settings.mySetting = value;
 					await this.plugin.saveSettings();
+					this.plugin.yuqueToken = value; // 更新 yuqueToken
+				})
+				.inputEl.addEventListener('blur', () => {
+					new Notice('设置已更新');
 				}));
 	}
 }
