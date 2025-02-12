@@ -11,7 +11,7 @@ class ConfirmModal extends Modal {
 	resolve: (value: boolean) => void;
 	reject: (reason?: any) => void;
 
-	constructor(app: App, private message: string) {
+	constructor(app: App, private message: string, private html_message?: string) {
 		super(app);
 	}
 
@@ -20,7 +20,7 @@ class ConfirmModal extends Modal {
 		contentEl.createEl('h3', { text: this.message });
 
 		// 添加一些文本内容
-		contentEl.createEl('p', { text: '你可以在这里放置任何 HTML 元素。' });
+		contentEl.createEl('p', { text: this.html_message });
 
 		// 创建按钮容器
 		const buttonContainer = contentEl.createDiv({ cls: 'yuque-sync-button-container' });
@@ -51,9 +51,9 @@ class ConfirmModal extends Modal {
 		contentEl.empty();
 	}
 
-	static async show(app: App, message: string): Promise<boolean> {
+	static async show(app: App, message: string, html_message?: string): Promise<boolean> {
 		return new Promise((resolve, reject) => {
-			const modal = new ConfirmModal(app, message);
+			const modal = new ConfirmModal(app, message, html_message);
 			modal.resolve = resolve;
 			modal.reject = reject;
 			modal.open();
@@ -120,13 +120,9 @@ export default class MyPlugin extends Plugin {
 
 		// 从语雀下载
 		const ribbonIconEl2 = this.addRibbonIcon('cloud-download', 'Download Yuque', async (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
 			const activeFile = this.app.workspace.getActiveFile();
 			if (activeFile) {
-				// 获取本地文件的更新时间
 				const local_mtime = await this.getFileMtime(activeFile);
-				
-				// 获取语雀文档的更新时间
 				const yuque_link = await this.getYuqueLinkFromYaml(activeFile);
 				if (yuque_link) {
 					const parts = this.extractParts(yuque_link);
@@ -136,20 +132,30 @@ export default class MyPlugin extends Plugin {
 						console.log("本地端时间: " + local_mtime);
 						console.log("语雀端时间: " + yuque_mtime);
 						new Notice(`本地端时间: ${local_mtime}\n语雀端时间: ${yuque_mtime}`);
+						const confirmed = await ConfirmModal.show(this.app, '确定要下载吗？', `本地端时间: ${local_mtime}\n语雀端时间: ${yuque_mtime}`);
+						if (confirmed) {
+							const doc = await this.getDoc(book_id, slug);
+							if (doc) {
+								const { title, content } = doc;
+								console.log(title, content);
 
-						// 如果本地文件的更新时间晚于语雀文档的更新时间，则下载语雀文档并提示用户是否覆盖本地文件
-						if (local_mtime < yuque_mtime) {
-							new Notice('语雀文档存在新版本是否更新');
-							// 下载语雀文档
-							// this.getDoc(book_id, slug);
-						}
-						else if (local_mtime == yuque_mtime) {
-							new Notice('无需更新');
-							// 下载语雀文档
-							// this.getDoc(book_id, slug);
-						}						
-						else {
-							new Notice('本地文档已是最新版本是否上传');
+								// 获取当前文件内容
+								const fileContent = await this.app.vault.read(activeFile);
+								const yaml = this.parseYamlFrontmatter(fileContent);
+								// 增加 yuque_title 属性
+								yaml['yuque_title'] = title;
+
+								// 保留 YAML 前置元数据并更新内容
+								const newContent = `---\n${Object.entries(yaml).map(([key, value]) => `${key}: ${value}`).join('\n')}\n---\n${content}`;
+								
+								await this.app.vault.modify(activeFile, newContent);
+
+								new Notice('文件更新成功');
+							} else {
+								new Notice('下载失败');
+							}
+						} else {
+							new Notice('操作已取消');
 						}
 					} else {
 						new Notice('Invalid Yuque link');
@@ -157,13 +163,11 @@ export default class MyPlugin extends Plugin {
 				} else {
 					new Notice('No Yuque link found');
 				}
-
-
-
 			} else {
 				new Notice('没有活动文件');
 			}
 		});
+
 
 		// Perform additional things with the ribbon
 		ribbonIconEl.addClass('my-plugin-ribbon-class');
@@ -263,6 +267,32 @@ export default class MyPlugin extends Plugin {
 			console.error(error);
 			new Notice('上传失败');
 		});
+	}
+
+	// 获取语雀文档
+	// 获取语雀文档
+	async getDoc(book_id: string, slug: string): Promise<{ title: string; content: string } | null> {
+		try {
+			const response = await requestUrl({
+				url: `https://www.yuque.com/api/v2/repos/${book_id}/docs/${slug}`,
+				method: 'GET',
+				headers: {
+					'Content-Type': 'application/json',
+					'X-Auth-Token': this.yuqueToken,
+				}
+			});
+
+			const data = response.json.data;
+			console.log(data); // 修改为输出对象而不是字符串
+			const title = data.title || '';
+			const content = data.body || '';
+			new Notice('下载成功');
+			return { title, content };
+		} catch (error) {
+			console.error(error);
+			new Notice('下载失败');
+			return null; // 确保总是返回一个值
+		}
 	}
 
 	// 获取语雀文档的更新时间
