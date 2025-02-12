@@ -6,3 +6,15 @@ available in the app when your plugin is enabled.
 If your plugin does not need CSS, delete this file.
 
 */
+/* styles.css */
+.yuque-sync-button-container {
+    /* display: flex;
+    justify-content: space-between;
+    margin-top: 10px; */
+    /* 调整顶部间距 */
+}
+
+.yuque-sync-button-container .mod-cta {
+    /* margin-right: 10px; */
+    /* 调整按钮之间的间距 */
+}

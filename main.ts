@@ -1,11 +1,64 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, requestUrl,Stat } from 'obsidian';
+import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, requestUrl, ButtonComponent } from 'obsidian';
 
 // Remember to rename these classes and interfaces!
 
 
-
 interface MyPluginSettings {
 	mySetting: string;
+}
+
+class ConfirmModal extends Modal {
+	resolve: (value: boolean) => void;
+	reject: (reason?: any) => void;
+
+	constructor(app: App, private message: string) {
+		super(app);
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.createEl('h3', { text: this.message });
+
+		// 添加一些文本内容
+		contentEl.createEl('p', { text: '你可以在这里放置任何 HTML 元素。' });
+
+		// 创建按钮容器
+		const buttonContainer = contentEl.createDiv({ cls: 'yuque-sync-button-container' });
+
+		const confirmButton = new ButtonComponent(buttonContainer)
+			.setButtonText('确认')
+			.onClick(() => {
+				this.resolve(true);
+				this.close();
+			});
+
+		const cancelButton = new ButtonComponent(buttonContainer)
+			.setButtonText('取消')
+			.onClick(() => {
+				this.resolve(false);
+				this.close();
+			});
+
+		// 添加内联样式以增加按钮之间的间距
+		// buttonContainer.style.display = 'flex';
+		// buttonContainer.style.justifyContent = 'space-between';
+		buttonContainer.style.marginTop = '10px'; // 调整顶部间距
+		confirmButton.buttonEl.style.marginRight = '20px'; // 调整按钮之间的间距
+	}
+
+	onClose() {
+		const { contentEl } = this;
+		contentEl.empty();
+	}
+
+	static async show(app: App, message: string): Promise<boolean> {
+		return new Promise((resolve, reject) => {
+			const modal = new ConfirmModal(app, message);
+			modal.resolve = resolve;
+			modal.reject = reject;
+			modal.open();
+		});
+	}
 }
 
 const DEFAULT_SETTINGS: MyPluginSettings = {
@@ -43,6 +96,8 @@ export default class MyPlugin extends Plugin {
 
 	async onload() {
 		await this.loadSettings();
+		// 加载 CSS 文件
+
 		console.log('Slug Plugin loaded');
 
 		// 语雀 Token
@@ -60,7 +115,7 @@ export default class MyPlugin extends Plugin {
 		// 上传到语雀
 		const ribbonIconEl = this.addRibbonIcon('cloud-upload', 'Upload Yuque', (evt: MouseEvent) => {
 			// Called when the user clicks the icon.
-			this.handleSlugAction();
+			this.handleAction();
 		});
 
 		// 从语雀下载
@@ -235,7 +290,7 @@ export default class MyPlugin extends Plugin {
 
 
 	// 处理点击事件，获取 slug 并显示消息
-	async handleSlugAction() {
+	async handleAction() {
 		const activeFile = this.app.workspace.getActiveFile();
 		if (activeFile) {
 			const yuque_link = await this.getYuqueLinkFromYaml(activeFile);
@@ -248,7 +303,13 @@ export default class MyPlugin extends Plugin {
 				const parts = this.extractParts(yuque_link);
 				if (parts) {
 					const { book_id, slug } = parts;
-					this.putDoc(book_id, slug, content, fileName);
+					// 显示确认框
+					const confirmed = await ConfirmModal.show(this.app, '确定要上传到语雀吗？');
+					if (confirmed) {
+						this.putDoc(book_id, slug, content, fileName);
+					}
+
+					// this.putDoc(book_id, slug, content, fileName);
 				} else {
 					this.displayMessage('Invalid Yuque link');
 				}
