@@ -3,10 +3,10 @@ name: Build and Package npm Project
 on:
   push:
     branches:
-      - main # 触发条件：当代码推送到 main 分支时触发
+      - master # 触发条件：当代码推送到 master 分支时触发
   pull_request:
     branches:
-      - main # 触发条件：当向 main 分支发起 Pull Request 时触发
+      - master # 触发条件：当向 master 分支发起 Pull Request 时触发
 
 jobs:
   build:
