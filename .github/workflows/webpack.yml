@@ -5,31 +5,44 @@ on:
     branches: [ "master" ]
   pull_request:
     branches: [ "master" ]
+  workflow_dispatch: # 允许手动触发
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     strategy:
       matrix:
-        node-version: [22.x]
+        node-version: [18.x, 20.x, 22.x]
 
     steps:
     - uses: actions/checkout@v4
+
+    - name: Cache npm dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.npm
+        key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+        restore-keys: |
+          ${{ runner.os }}-node-
 
     - name: Use Node.js ${{ matrix.node-version }}
       uses: actions/setup-node@v4
       with:
         node-version: ${{ matrix.node-version }}
 
-    - name: Build
-      run: |
-        npm install
-        npm run build
+    - name: Install dependencies
+      run: npm install
 
-    # （可选）上传打包结果作为构建产物
+    - name: Build with Webpack
+      run: npm run build
+
+    - name: Verify build output
+      run: |
+        ls dist/ # 假设 Webpack 输出到 dist 目录
+        test -f dist/main.js || echo "Build failed: main.js not found"
+
     - name: Upload build artifacts
       uses: actions/upload-artifact@v3
       with:
-        name: build-output
-        path: dist/ # 假设打包结果存放在 dist 目录
+        name: webpack-output
+        path: dist/
