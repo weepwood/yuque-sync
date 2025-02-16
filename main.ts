@@ -123,6 +123,7 @@ export default class MyPlugin extends Plugin {
 			const activeFile = this.app.workspace.getActiveFile();
 			if (activeFile) {
 				const local_mtime = await this.getFileMtime(activeFile);
+				
 				const yuque_link = await this.getYuqueLinkFromYaml(activeFile);
 				if (yuque_link) {
 					const parts = this.extractParts(yuque_link);
@@ -132,7 +133,7 @@ export default class MyPlugin extends Plugin {
 						console.log("本地端时间: " + local_mtime);
 						console.log("语雀端时间: " + yuque_mtime);
 						new Notice(`本地端时间: ${local_mtime}\n语雀端时间: ${yuque_mtime}`);
-						const confirmed = await ConfirmModal.show(this.app, '确定要下载吗？', `本地端时间: ${local_mtime}\n语雀端时间: ${yuque_mtime}`);
+						const confirmed = await ConfirmModal.show(this.app, '确定要下载吗？', `本地端时间: ${local_mtime} \n 语雀端时间: ${yuque_mtime}`);
 						if (confirmed) {
 							const doc = await this.getDoc(book_id, slug);
 							if (doc) {
@@ -147,7 +148,16 @@ export default class MyPlugin extends Plugin {
 
 								// 保留 YAML 前置元数据并更新内容
 								const newContent = `---\n${Object.entries(yaml).map(([key, value]) => `${key}: ${value}`).join('\n')}\n---\n${content}`;
+
+								// 获取当前时间戳
+								const local_mtime_stamp = new Date(local_mtime).getTime();
+
+								// 复制当前文件
+								const copyFile = await this.app.vault.create(`${activeFile.parent?.path}/${activeFile.basename}_${local_mtime_stamp}.md`, fileContent);
+
+								// await this.app.vault.create(activeFile.path, newContent);
 								
+								// 更新当前文件
 								await this.app.vault.modify(activeFile, newContent);
 
 								new Notice('文件更新成功');
