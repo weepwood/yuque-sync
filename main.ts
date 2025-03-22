@@ -386,20 +386,30 @@ export default class MyPlugin extends Plugin {
 
 	async uploadImageToYuque2(file: any) {
 		const apiUrl = "https://www.yuque.com/api/upload/attach";
-		const formData = new FormData();
+		// const formData = new FormData();
 		const arrayBuffer = await this.app.vault.readBinary(file);
-		const blob = new Blob([arrayBuffer]); // 这里假设是 PNG 图片
-		formData.append("file", blob, file.name);  // 确保提供文件名
-		const fileType = "image/octet-stream"; // Blob 默认无法获取文件类型，可以手动指定
+		// const blob = new Blob([arrayBuffer], { type:"image/png"}); // 这里假设是 PNG 图片
+		// formData.append("file", blob, file.name);  // 确保提供文件名
+
+		// 使用getMimeType函数判断文件类型
+		const fileType = this.getMimeType(file.name);
 		console.log("文件名：" + file.name);
-		console.log("文件类型"+ file.type);
+		console.log("文件类型：" + fileType);
 
 		const boundary = "----WebKitFormBoundary" + Math.random().toString(16);
 		let body = `--${boundary}\r\n`;
 		body += `Content-Disposition: form-data; name="file"; filename="${file.name}"\r\n`;
 		body += `Content-Type: ${fileType}\r\n\r\n`;
-		body += await blob.text();
-		body += `\r\n--${boundary}--`;
+
+		const bodyEnd = `\r\n--${boundary}--\r\n`;
+		
+		// 合并文本和文件数据
+		const encoder = new TextEncoder();
+		const bodyBuffer = new Uint8Array([
+			...encoder.encode(body),
+			...new Uint8Array(arrayBuffer),
+			...encoder.encode(bodyEnd),
+		]);
 
 
 		const response = await requestUrl({
@@ -412,7 +422,7 @@ export default class MyPlugin extends Plugin {
 				'Origin': 'https://www.yuque.com',
 				'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36 Edg/134.0.0.0',
 			},
-			body: body
+			body: bodyBuffer.buffer,
 		});
 		console.log(response);
 		if (response.status === 200) {
@@ -457,27 +467,6 @@ export default class MyPlugin extends Plugin {
 		}
 	}
 
-	async replaceLocalImages2(activeFile: TFile) {
-		let content = await this.app.vault.read(activeFile);
-		console.log("Content:", content);
-		const wikiImageRegex = /!\[\[([^\]]+)\]\]/g;
-		const markdownImageRegex = /!\[.*?\]\(([^)]+)\)/g;
-		let match;
-
-		while ((match = markdownImageRegex.exec(content))!== null) {
-			const fileName = match[1];
-			const file = this.app.metadataCache.getFirstLinkpathDest(fileName, activeFile.path);
-			if (file) {
-				console.log("File:", file);
-				const imageUrl = await this.uploadImageToYuque2(file);
-				console.log("Image URL:", imageUrl);
-				if (imageUrl) {
-					content = content.replace(match[0], `![${fileName}](${imageUrl})`);
-				}
-			}
-		}
-	}
-
 	async replaceLocalImages(activeFile: TFile) {
 		let content = await this.app.vault.read(activeFile);
 		console.log("Content:", content);
@@ -487,6 +476,8 @@ export default class MyPlugin extends Plugin {
 
 		let match;
 		const localImages: string[] = [];
+
+		// TODO 增加进度显示
 
 		while ((match = wikiImageRegex.exec(content)) !== null) {
 			const fileName = match[1];
@@ -498,7 +489,7 @@ export default class MyPlugin extends Plugin {
 					console.log(`Uploaded image: ${fileName}`);
 					const imageUrl = await this.uploadImageToYuque2(file);
 					if (imageUrl) {
-						content = content.replace(match[0], `![](${imageUrl})`);
+						content = content.replace(match[0], `![${fileName}](${imageUrl})`);
 					} else {
 						console.error(`Upload failed for: ${fileName}`);
 					}
@@ -523,7 +514,7 @@ export default class MyPlugin extends Plugin {
 					console.log(`Uploaded image: ${file}`);
 					const imageUrl = await this.uploadImageToYuque2(file);
 					if (imageUrl) {
-						content = content.replace(match[0], `![](${imageUrl})`);
+						content = content.replace(match[0], `![${imagePath}](${imageUrl})`);
 					} else {
 						console.error(`Upload failed for: ${imagePath}`);
 					}
