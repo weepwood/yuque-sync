@@ -178,6 +178,11 @@ export default class MyPlugin extends Plugin {
 			}
 		});
 
+		// 图片上传到语雀
+		const ribbonIconEl3 = this.addRibbonIcon('image', 'Upload Image to Yuque', async (evt: MouseEvent) => {
+			
+		})
+
 
 		// Perform additional things with the ribbon
 		ribbonIconEl.addClass('my-plugin-ribbon-class');
@@ -251,7 +256,6 @@ export default class MyPlugin extends Plugin {
 		return date.toLocaleString(); // 转换为本地日期时间格式
 	}
 
-
 	// 上传到语雀
 	async putDoc(book_id: string, slug: string, content: string, fileName: string) {
 		console.log(this.yuqueToken);
@@ -279,7 +283,6 @@ export default class MyPlugin extends Plugin {
 		});
 	}
 
-	// 获取语雀文档
 	// 获取语雀文档
 	async getDoc(book_id: string, slug: string): Promise<{ title: string; content: string } | null> {
 		try {
