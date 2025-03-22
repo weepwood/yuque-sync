@@ -1,8 +1,6 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, requestUrl, ButtonComponent } from 'obsidian';
+import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, requestUrl, ButtonComponent } from 'obsidian';
 
 // Remember to rename these classes and interfaces!
-
-
 interface MyPluginSettings {
 	mySetting: string;
 }
@@ -32,7 +30,7 @@ class ConfirmModal extends Modal {
 				this.close();
 			});
 
-		const cancelButton = new ButtonComponent(buttonContainer)
+		new ButtonComponent(buttonContainer)
 			.setButtonText('取消')
 			.onClick(() => {
 				this.resolve(false);
@@ -68,7 +66,33 @@ const DEFAULT_SETTINGS: MyPluginSettings = {
 export default class MyPlugin extends Plugin {
 	settings: MyPluginSettings;
 
-	yuqueToken: string = '';
+
+	yuqueToken = '';
+	yuqueCookie = '';
+	
+	// 根据文件扩展名获取MIME类型
+	getMimeType(filename: string): string {
+		const ext = filename.split('.').pop()?.toLowerCase();
+		const mimeTypes: {[key: string]: string} = {
+			'jpg': 'image/jpeg',
+			'jpeg': 'image/jpeg',
+			'png': 'image/png',
+			'gif': 'image/gif',
+			'svg': 'image/svg+xml',
+			'webp': 'image/webp',
+			'bmp': 'image/bmp',
+			'ico': 'image/x-icon',
+			'tiff': 'image/tiff',
+			'tif': 'image/tiff',
+			// 'pdf': 'application/pdf',
+			// 'zip': 'application/zip',
+			// 'rar': 'application/x-rar-compressed',
+			// '7z': 'application/x-7z-compressed',
+			// 'tar': 'application/x-tar',
+		};
+		return ext && mimeTypes[ext] ? mimeTypes[ext] : 'application/octet-stream';
+	}
+
 
 	// 从 URL 中提取 book_id 和 slug
 	extractParts(url: string): { book_id: string; slug: string } | null {
@@ -152,8 +176,8 @@ export default class MyPlugin extends Plugin {
 								// 获取当前时间戳
 								const local_mtime_stamp = new Date(local_mtime).getTime();
 
-								// 复制当前文件
-								const copyFile = await this.app.vault.create(`${activeFile.parent?.path}/${activeFile.basename}_${local_mtime_stamp}.md`, fileContent);
+								// 复制当前文件 const copyFile
+								await this.app.vault.create(`${activeFile.parent?.path}/${activeFile.basename}_${local_mtime_stamp}.md`, fileContent);
 
 								// await this.app.vault.create(activeFile.path, newContent);
 								
@@ -374,7 +398,8 @@ export default class MyPlugin extends Plugin {
 		const fileContent = await this.app.vault.read(file);
 		const yaml = this.parseYamlFrontmatter(fileContent);
 		const content = fileContent.replace(/^---\s*([\s\S]*?)\s*---/, '');
-		console.log("MarkDown: "+content);
+		console.log("MarkDown: " + content);
+		console.log("YAML: " + yaml);
 		return content;
 	}
 
@@ -450,21 +475,21 @@ export default class MyPlugin extends Plugin {
 	}
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+// class SampleModal extends Modal {
+// 	constructor(app: App) {
+// 		super(app);
+// 	}
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
+// 	onOpen() {
+// 		const {contentEl} = this;
+// 		contentEl.setText('Woah!');
+// 	}
 
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
-}
+// 	onClose() {
+// 		const {contentEl} = this;
+// 		contentEl.empty();
+// 	}
+// }
 
 class SampleSettingTab extends PluginSettingTab {
 	plugin: MyPlugin;
