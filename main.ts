@@ -86,7 +86,12 @@ export default class MyPlugin extends Plugin {
 			'bmp': 'image/bmp',
 			'ico': 'image/x-icon',
 			'tiff': 'image/tiff',
-			'tif': 'image/tiff'
+			'tif': 'image/tiff',
+			// 'pdf': 'application/pdf',
+			// 'zip': 'application/zip',
+			// 'rar': 'application/x-rar-compressed',
+			// '7z': 'application/x-7z-compressed',
+			// 'tar': 'application/x-tar',
 		};
 		return ext && mimeTypes[ext] ? mimeTypes[ext] : 'application/octet-stream';
 	}
