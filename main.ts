@@ -1,8 +1,6 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, requestUrl, ButtonComponent } from 'obsidian';
+import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, requestUrl, ButtonComponent } from 'obsidian';
 
 // Remember to rename these classes and interfaces!
-
-
 interface MyPluginSettings {
 	mySetting: string;
 	yuqueCookie: string;
@@ -33,7 +31,7 @@ class ConfirmModal extends Modal {
 				this.close();
 			});
 
-		const cancelButton = new ButtonComponent(buttonContainer)
+		new ButtonComponent(buttonContainer)
 			.setButtonText('取消')
 			.onClick(() => {
 				this.resolve(false);
@@ -213,8 +211,8 @@ export default class MyPlugin extends Plugin {
 								// 获取当前时间戳
 								const local_mtime_stamp = new Date(local_mtime).getTime();
 
-								// 复制当前文件
-								const copyFile = await this.app.vault.create(`${activeFile.parent?.path}/${activeFile.basename}_${local_mtime_stamp}.md`, fileContent);
+								// 复制当前文件 const copyFile
+								await this.app.vault.create(`${activeFile.parent?.path}/${activeFile.basename}_${local_mtime_stamp}.md`, fileContent);
 
 								// await this.app.vault.create(activeFile.path, newContent);
 								
@@ -609,7 +607,8 @@ export default class MyPlugin extends Plugin {
 		const fileContent = await this.app.vault.read(file);
 		const yaml = this.parseYamlFrontmatter(fileContent);
 		const content = fileContent.replace(/^---\s*([\s\S]*?)\s*---/, '');
-		console.log("MarkDown: "+content);
+		console.log("MarkDown: " + content);
+		console.log("YAML: " + yaml);
 		return content;
 	}
 
@@ -685,21 +684,21 @@ export default class MyPlugin extends Plugin {
 	}
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+// class SampleModal extends Modal {
+// 	constructor(app: App) {
+// 		super(app);
+// 	}
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
+// 	onOpen() {
+// 		const {contentEl} = this;
+// 		contentEl.setText('Woah!');
+// 	}
 
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
-}
+// 	onClose() {
+// 		const {contentEl} = this;
+// 		contentEl.empty();
+// 	}
+// }
 
 class SampleSettingTab extends PluginSettingTab {
 	plugin: MyPlugin;
