@@ -1,6 +1,4 @@
 import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, requestUrl, ButtonComponent } from 'obsidian';
-const FormData = require('form-data'); // 使用 form-data 模块
-const path = require('path');
 
 // Remember to rename these classes and interfaces!
 
@@ -72,8 +70,8 @@ const DEFAULT_SETTINGS: MyPluginSettings = {
 export default class MyPlugin extends Plugin {
 	settings: MyPluginSettings;
 
-	yuqueToken: string = '';
-	yuqueCookie: string = '';
+	yuqueToken = '';
+	yuqueCookie = '';
 	
 	// 根据文件扩展名获取MIME类型
 	getMimeType(filename: string): string {
@@ -121,6 +119,39 @@ export default class MyPlugin extends Plugin {
 		await this.loadSettings();
 		// 加载 CSS 文件
 
+		this.addCommand({
+			id: "get-images",
+			name: "获取文档中的图片",
+			callback: async () => {
+				const file = this.app.workspace.getActiveFile();
+				if (!file) {
+					new Notice("未打开任何文件");
+					return;
+				}
+
+				const content = await this.app.vault.read(file);
+				const imageRegex = /!\[\[([^\]]+)\]\]|!\[.*?\]\((.*?)\)/g;
+				let match;
+				const images = [];
+
+				while ((match = imageRegex.exec(content)) !== null) {
+					const imgPath = match[1] || match[2]; // 获取匹配的图片路径
+					// 排除 http 和 https 开头的图片
+					if (imgPath.startsWith("http://") || imgPath.startsWith("https://")) {
+						continue;
+					}
+					images.push(imgPath);
+				}
+
+				if (images.length > 0) {
+					new Notice("图片列表：" + images.join(", "));
+					console.log("文档中的图片：", images);
+				} else {
+					new Notice("文档中未找到图片");
+				}
+			},
+		});
+
 		console.log('Slug Plugin loaded');
 
 		// 语雀 Token
@@ -144,7 +175,7 @@ export default class MyPlugin extends Plugin {
 		});
 
 		// 从语雀下载
-		const ribbonIconEl2 = this.addRibbonIcon('cloud-download', 'Download Yuque', async (evt: MouseEvent) => {
+		this.addRibbonIcon('cloud-download', 'Download Yuque', async (evt: MouseEvent) => {
 			const activeFile = this.app.workspace.getActiveFile();
 			if (activeFile) {
 				const local_mtime = await this.getFileMtime(activeFile);
@@ -202,23 +233,22 @@ export default class MyPlugin extends Plugin {
 				new Notice('没有活动文件');
 			}
 		});
+		
 
 		// 图片上传到语雀
-		const ribbonIconEl3 = this.addRibbonIcon('image', 'Upload Image to Yuque', async (evt: MouseEvent) => {
+		this.addRibbonIcon('image', 'Upload Image to Yuque', async (evt: MouseEvent) => {
 			const activeFile = this.app.workspace.getActiveFile();
+			console.log(activeFile);
 			if (activeFile) {
 				// 获取文件内容
-				const fileContent = await this.app.vault.read(activeFile);
-				
+				await this.app.vault.read(activeFile);
+
 				// 确认是否要上传图片
 				const confirmed = await ConfirmModal.show(this.app, '确定要上传图片到语雀吗？');
 				if (confirmed) {
 					try {
 						// 上传图片并替换链接
-						const newContent = await this.uploadImagesToYuque(fileContent, activeFile);
-						
-						// 更新文件内容
-						await this.app.vault.modify(activeFile, newContent);
+						await this.replaceLocalImages(activeFile);
 						new Notice('图片上传成功并已更新链接');
 					} catch (error) {
 						console.error('图片上传失败:', error);
@@ -229,7 +259,6 @@ export default class MyPlugin extends Plugin {
 				new Notice('没有活动文件');
 			}
 		})
-
 
 		// Perform additional things with the ribbon
 		ribbonIconEl.addClass('my-plugin-ribbon-class');
@@ -355,126 +384,169 @@ export default class MyPlugin extends Plugin {
 		}
 	}
 
-	// 上传图片到语雀
-	async uploadImageToYuque(imagePath: string, file: TFile): Promise<string> {
-		// 获取图片的绝对路径
-		const adapter = this.app.vault.adapter;
-		const basePath = adapter.getBasePath();
-		
-		// 对图片路径进行URL解码，处理特殊字符如%等
-		const decodedImagePath = decodeURIComponent(imagePath);
-		
-		const absoluteImagePath = decodedImagePath.startsWith('/') 
-			? path.resolve(basePath, '.' + decodedImagePath) 
-			: path.resolve(basePath, path.dirname(file.path), decodedImagePath);
-		
-		// 打印图片的绝对路径到控制台
-		console.log('原始图片路径:', imagePath);
-		console.log('解码后图片路径:', decodedImagePath);
-		console.log('图片绝对路径:', absoluteImagePath);
-		
-		// 检查文件是否存在
-		const file = app.vault.getAbstractFileByPath(imagePath);
-		if (!(file instanceof TFile)) {
-			new Notice("文件不存在或无效");
+	async uploadImageToYuque2(file: any) {
+		const apiUrl = "https://www.yuque.com/api/upload/attach";
+		const formData = new FormData();
+		const arrayBuffer = await this.app.vault.readBinary(file);
+		const blob = new Blob([arrayBuffer]); // 这里假设是 PNG 图片
+		formData.append("file", blob, file.name);  // 确保提供文件名
+		const fileType = "image/octet-stream"; // Blob 默认无法获取文件类型，可以手动指定
+		console.log("文件名：" + file.name);
+		console.log("文件类型"+ file.type);
+
+		const boundary = "----WebKitFormBoundary" + Math.random().toString(16);
+		let body = `--${boundary}\r\n`;
+		body += `Content-Disposition: form-data; name="file"; filename="${file.name}"\r\n`;
+		body += `Content-Type: ${fileType}\r\n\r\n`;
+		body += await blob.text();
+		body += `\r\n--${boundary}--`;
+
+
+		const response = await requestUrl({
+			url: apiUrl,
+			method: "POST",
+			headers: {
+				"Content-Type": `multipart/form-data; boundary=${boundary}`,
+				'Cookie': 'receive-cookie-deprecation=1; lang=zh-cn; _uab_collina=173112094991807440099133; receive-cookie-deprecation=1; _tea_utm_cache_20001731={%22utm_source%22:%22ld246.com%22}; _yuque_session=Wp4jcnzLxQz_Ipaz8d5WOKiEcGqnYOd0jF_u6u4Ocu8IbOJ0qJ4YRl3lu-nfgxo0e4_9yc2DrIjUH2EMqDFiTA==; tfstk=gYLjN6tOPdLzf8wkixhPNHKJV_b6cdgUh519tCU46ZQYBRddUSrV0sz6Vdpl0tpNuRg6FZIM0OWVCNOMdbkE82RDiNbqLvuU08FeYwVYWieNw7CC5shckkM9iNbtU7ztY2ODpoOpgFQtNaC19-QTDih7e6W8k1UA68h5sTQO6PUTyaCOtsBTDdd-N1XRBNQt6hNC1m6DGjp2vdbIpodCFPU9P_HGBIwgXTxRGa6pME9kUUaOc9dAFPkBIWWRe6T-I-WMPQLAsL3zlNOR1p_vVYUXCIKHI6pxP-CXDBOFVFDL5_xJng5XVfERHBB5kTTisPXv0CLNfEHL_tLD3UsHS-MPQHRykg9KUz9GfnKdkFMIygSg89_qIlN5xP15LbG7jljKnSCTr5HXSiClGglSN-KGD_f5ZbG7jljAZ_zsNbwvj; aliyungf_tc=c9abd5c69e5bb19b4ecefca42c83198bfb1242af36e0e872b1cd8874c084c201; yuque_ctoken=DxBOK1gOwW0Bcl1HkO4NPTBL; current_theme=default; acw_tc=ac11000117426484784368803e14fcae9bc33f9b16246248e7f78b5f51b6d6',
+				'Referer': 'https://www.yuque.com',
+				'Origin': 'https://www.yuque.com',
+				'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36 Edg/134.0.0.0',
+			},
+			body: body
+		});
+		console.log(response);
+		if (response.status === 200) {
+			const result = await response.json;
+			console.log(result);
+			new Notice('上传成功');
+			return result.data.url; // 获取返回的 URL
+		} else {
+			console.error("上传失败:", response.status);
+			console.error("上传失败:", response.text);
+			return null; // 上传失败时返回 null
+		}
+	}
+
+	// 获取文件的本地图片列表
+	async getLocalImages(file: TFile) {
+		// const file = this.app.workspace.getActiveFile();
+		if (!file) {
+			new Notice("未打开任何文件");
 			return;
 		}
 
-		// 读取文件内容为 ArrayBuffer
-		const buffer = await app.vault.readBinary(imagePath);
-		// 将 Buffer 转换为 Blob
-		const blob = new Blob([buffer], { type: 'application/octet-stream' });
-		console.log('Blob created:', blob);
-
-		// 构造 FormData
-		const formData = new FormData();
-		formData.append("file", blob, path.basename(imagePath));
-		
-		// 发送请求到语雀API
-		try {
-			const response = await requestUrl({
-				url: 'https://www.yuque.com/api/upload/attach',
-				method: 'POST',
-				headers: {
-					// 'Content-Type': `"multipart/form-data; boundary=--------------------------479796840006281570463111"`,
-					'Cookie': this.yuqueCookie,
-					'Referer': 'https://www.yuque.com',
-					'Origin': 'https://www.yuque.com',
-					'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36 Edg/134.0.0.0',
-				},
-				body: formData
-			});
-			
-			// 处理返回结果
-			if (response.status === 200) {
-				const data = response.json;
-				console.log("上传成功:", data);
-				new Notice("上传成功: " + data.data.url);
-				return data.data.url; // 返回上传后的 URL
-			} else {
-				console.error("上传失败:", response);
-				new Notice("上传失败: " + response.text);
-			}
-
-		} catch (error) {
-			console.error("请求错误:", error);
-			new Notice("请求错误: " + error.message);
-		}
-	}
-	
-	// 上传文档中的所有图片到语雀并替换链接
-	async uploadImagesToYuque(content: string, file: TFile): Promise<string> {
-		// 匹配Markdown中的图片链接
-		const imageRegex = /!\[([^\]]*)\]\(([^\)]+)\)/g;
+		const content = await this.app.vault.read(file);
+		const imageRegex = /!\[\[([^\]]+)\]\]|!\[.*?\]\((.*?)\)/g;
 		let match;
-		let newContent = content;
-		let replacements = [];
-		
-		// 收集所有需要替换的图片
+		const images = [];
+
 		while ((match = imageRegex.exec(content)) !== null) {
-			const [fullMatch, altText, imagePath] = match;
-			
-			// 跳过已经是网络图片的链接
-			if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) {
+			const imgPath = match[1] || match[2]; // 获取匹配的图片路径
+			// 排除 http 和 https 开头的图片
+			if (imgPath.startsWith("http://") || imgPath.startsWith("https://")) {
 				continue;
 			}
-			
-			// 添加到替换列表
-			replacements.push({
-				fullMatch,
-				altText,
-				imagePath
-			});
+			images.push(imgPath);
 		}
-		
-		// 显示进度提示
-		if (replacements.length > 0) {
-			new Notice(`开始上传 ${replacements.length} 张图片...`);
+
+		if (images.length > 0) {
+			new Notice("图片列表：" + images.join(", "));
+			console.log("文档中的图片：", images);
 		} else {
-			new Notice('没有找到本地图片');
-			return content;
+			new Notice("文档中未找到图片");
 		}
-		
-		// 逐个上传图片并替换链接
-		for (const item of replacements) {
-			try {
-				// 上传图片到语雀
-				const yuqueUrl = await this.uploadImageToYuque(item.imagePath, file);
-				console.log('上传后的语雀链接:', yuqueUrl);
-				
-				// 替换原始链接
-				const newImageMarkdown = `![${item.altText}](${yuqueUrl})`;
-				newContent = newContent.replace(item.fullMatch, newImageMarkdown);
-				
-				new Notice(`已上传: ${item.imagePath}`);
-			} catch (error) {
-				console.error(`上传图片 ${item.imagePath} 失败:`, error);
-				new Notice(`上传图片 ${item.imagePath} 失败: ${(error as Error).message}`);
+	}
+
+	async replaceLocalImages2(activeFile: TFile) {
+		let content = await this.app.vault.read(activeFile);
+		console.log("Content:", content);
+		const wikiImageRegex = /!\[\[([^\]]+)\]\]/g;
+		const markdownImageRegex = /!\[.*?\]\(([^)]+)\)/g;
+		let match;
+
+		while ((match = markdownImageRegex.exec(content))!== null) {
+			const fileName = match[1];
+			const file = this.app.metadataCache.getFirstLinkpathDest(fileName, activeFile.path);
+			if (file) {
+				console.log("File:", file);
+				const imageUrl = await this.uploadImageToYuque2(file);
+				console.log("Image URL:", imageUrl);
+				if (imageUrl) {
+					content = content.replace(match[0], `![${fileName}](${imageUrl})`);
+				}
 			}
 		}
-		
-		return newContent;
 	}
+
+	async replaceLocalImages(activeFile: TFile) {
+		let content = await this.app.vault.read(activeFile);
+		console.log("Content:", content);
+
+		const wikiImageRegex = /!\[\[([^\]]+)\]\]/g;
+		const markdownImageRegex = /!\[.*?\]\(([^)]+)\)/g;
+
+		let match;
+		const localImages: string[] = [];
+
+		while ((match = wikiImageRegex.exec(content)) !== null) {
+			const fileName = match[1];
+			const file = this.app.metadataCache.getFirstLinkpathDest(fileName, activeFile.path);
+
+			if (file) {
+				localImages.push(fileName);
+				try {
+					console.log(`Uploaded image: ${fileName}`);
+					const imageUrl = await this.uploadImageToYuque2(file);
+					if (imageUrl) {
+						content = content.replace(match[0], `![](${imageUrl})`);
+					} else {
+						console.error(`Upload failed for: ${fileName}`);
+					}
+				} catch (error) {
+					console.error(`上传错误 ${fileName}:`, error);
+				}
+			} else {
+				console.warn(`File not found: ${fileName}`);
+			}
+		}
+
+		while ((match = markdownImageRegex.exec(content)) !== null) {
+			const imagePath = match[1];
+
+			if (imagePath.startsWith("http")) continue;
+
+			const file = this.app.metadataCache.getFirstLinkpathDest(imagePath, activeFile.path);
+
+			if (file) {
+				localImages.push(imagePath);
+				try {
+					console.log(`Uploaded image: ${file}`);
+					const imageUrl = await this.uploadImageToYuque2(file);
+					if (imageUrl) {
+						content = content.replace(match[0], `![](${imageUrl})`);
+					} else {
+						console.error(`Upload failed for: ${imagePath}`);
+					}
+				} catch (error) {
+					console.error(`Error uploading ${imagePath}:`, error);
+				}
+			} else {
+				console.warn(`File not found: ${imagePath}`);
+			}
+		}
+
+		console.log("Extracted Local Images:", localImages);
+
+		// 仅当至少有一张图片上传成功时才修改文件
+		if (localImages.length > 0) {
+			await this.app.vault.modify(activeFile, content);
+			console.log("Images replaced successfully");
+		} else {
+			console.log("No images uploaded successfully, file not modified.");
+		}
+	}
+
+
 	
 	// 获取语雀文档的更新时间
 	async getDocMtime(book_id: string, slug: string): Promise<string> {
