@@ -1,11 +1,12 @@
-name: NodeJS with Webpack
+name: Build and Release
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [master]
+    tags: ["*"]
   pull_request:
-    branches: [ "master" ]
-  workflow_dispatch: # 允许手动触发
+    branches: [master]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -17,14 +18,6 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Cache npm dependencies
-      uses: actions/cache@v3
-      with:
-        path: ~/.npm
-        key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
-        restore-keys: |
-          ${{ runner.os }}-node-
-
     - name: Use Node.js ${{ matrix.node-version }}
       uses: actions/setup-node@v4
       with:
@@ -33,14 +26,31 @@ jobs:
     - name: Install dependencies
       run: npm install
 
-    - name: Build with Webpack
+    - name: Build
       run: npm run build
 
     - name: Verify build output
       run: test -f main.js || echo "Build failed: main.js not found"
 
-    - name: Upload build artifacts
-      uses: actions/upload-artifact@v4
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: npm install
+
+    - name: Build
+      run: npm run build
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
       with:
-        name: plugin-output
-        path: main.js
+        files: |
+          main.js
+          manifest.json
+          styles.css
+        generate_release_notes: true
