@@ -71,6 +71,8 @@ export default class MyPlugin extends Plugin {
 
 	yuqueToken = '';
 
+	statusBarItem: HTMLElement;
+
 	// 从 URL 中提取 book_id 和 slug
 	extractParts(url: string): { book_id: string; slug: string } | null {
 		// 确保 URL 以 https://www.yuque.com/ 开头
@@ -226,6 +228,23 @@ export default class MyPlugin extends Plugin {
 			});
 		}));
 
+		// 注册文件右键菜单 - 上传所有图片到语雀
+		this.registerEvent(this.app.workspace.on('file-menu', (menu: Menu, file: TFile) => {
+			if (!this.settings.yuqueCookie) return;
+			if (file.extension !== 'md') return;
+
+			menu.addItem((item) => {
+				item.setTitle('上传所有图片到语雀')
+					.setIcon('upload')
+					.onClick(async () => {
+						const confirmed = await ConfirmModal.show(this.app, '确定要上传本文档中的所有图片到语雀吗？');
+						if (confirmed) {
+							await this.uploadAllImagesInFile(file);
+						}
+					});
+			});
+		}));
+
 		// This adds a settings tab so the user can configure various aspects of the plugin
 		this.addSettingTab(new SampleSettingTab(this.app, this));
 	}
@@ -324,6 +343,11 @@ export default class MyPlugin extends Plugin {
 	// 上传图片到语雀
 	async uploadImageToYuque(file: TFile): Promise<string | null> {
 		try {
+			const imageExts = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'ico', 'tiff', 'tif'];
+			if (!imageExts.includes(file.extension.toLowerCase())) {
+				console.error('不支持的文件类型:', file.extension);
+				return null;
+			}
 			const fileData = await this.app.vault.readBinary(file);
 
 			// 手动构建 multipart/form-data 请求体
@@ -366,6 +390,79 @@ export default class MyPlugin extends Plugin {
 		}
 	}
 
+	// 上传文档中的所有图片到语雀
+	async uploadAllImagesInFile(file: TFile): Promise<void> {
+		try {
+			const content = await this.app.vault.read(file);
+			const imageRegex = /!\[.*?\]\(([^)]+)\)/g;
+
+			// 找出所有本地图片路径（去重）
+			const imagePaths = new Set<string>();
+			let match: RegExpExecArray | null;
+			while ((match = imageRegex.exec(content)) !== null) {
+				const path = match[1];
+				if (path.startsWith('http://') || path.startsWith('https://')) continue;
+				imagePaths.add(path);
+			}
+
+			if (imagePaths.size === 0) {
+				new Notice('未找到本地图片');
+				return;
+			}
+
+			const total = imagePaths.size;
+			this.statusBarItem.setText('正在上传图片：0/' + total);
+
+			// 逐张上传
+			const replacements: Array<{ local: string; url: string }> = [];
+			let failCount = 0;
+			let current = 0;
+
+			for (const imagePath of imagePaths) {
+				current++;
+				this.statusBarItem.setText('正在上传图片：' + current + '/' + total + ' - ' + imagePath);
+
+				const decodedPath = decodeURIComponent(imagePath);
+				const resolvedFile = this.app.metadataCache.getFirstLinkpathDest(decodedPath, file.path);
+				if (!resolvedFile) {
+					console.error('无法解析图片路径:', imagePath);
+					failCount++;
+					continue;
+				}
+
+				const url = await this.uploadImageToYuque(resolvedFile);
+				if (url) {
+					replacements.push({ local: imagePath, url: url });
+				} else {
+					failCount++;
+				}
+			}
+
+			if (replacements.length === 0) {
+				this.statusBarItem.setText('图片上传失败');
+				setTimeout(() => this.statusBarItem.setText(''), 5000);
+				new Notice('所有图片上传失败');
+				return;
+			}
+
+			// 替换文件中的路径
+			let newContent = content;
+			for (const { local, url } of replacements) {
+				newContent = newContent.split('(' + local + ')').join('(' + url + ')');
+			}
+			await this.app.vault.modify(file, newContent);
+
+			const successCount = replacements.length;
+			this.statusBarItem.setText('图片上传完成：成功 ' + successCount + ' 张' + (failCount > 0 ? '，失败 ' + failCount + ' 张' : ''));
+			setTimeout(() => this.statusBarItem.setText(''), 8000);
+			new Notice('上传完成：成功 ' + successCount + ' 张' + (failCount > 0 ? '，失败 ' + failCount + ' 张' : ''));
+		} catch (error) {
+			this.statusBarItem.setText('图片上传失败');
+			setTimeout(() => this.statusBarItem.setText(''), 5000);
+			console.error(error);
+			new Notice('上传图片失败');
+		}
+	}
 
 	// 获取语雀文档
 	async getDoc(book_id: string, slug: string): Promise<{ title: string; content: string } | null> {
