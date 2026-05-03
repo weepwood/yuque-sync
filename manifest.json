@@ -1,11 +1,9 @@
 {
 	"id": "yuque-sync",
 	"name": "Yuque Sync",
-	"version": "1.0.1",
+	"version": "1.0.2",
 	"minAppVersion": "0.15.0",
-	"description": "Demonstrates some of the capabilities of the Obsidian API.",
-	"author": "Obsidian",
-	"authorUrl": "https://obsidian.md",
-	"fundingUrl": "https://obsidian.md/pricing",
+	"description": "Sync markdown files between Obsidian and Yuque",
+	"author": "weepwood",
 	"isDesktopOnly": false
 }
