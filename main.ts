@@ -3,7 +3,6 @@ import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, requestUr
 // Remember to rename these classes and interfaces!
 interface MyPluginSettings {
 	mySetting: string;
-	yuqueCookie: string;
 }
 
 class ConfirmModal extends Modal {
@@ -62,39 +61,12 @@ class ConfirmModal extends Modal {
 
 const DEFAULT_SETTINGS: MyPluginSettings = {
 	mySetting: 'default',
-	yuqueCookie: ''
 }
 
 export default class MyPlugin extends Plugin {
 	settings!: MyPluginSettings;
 
-
 	yuqueToken = '';
-	yuqueCookie = '';
-
-	// 根据文件扩展名获取MIME类型
-	getMimeType(filename: string): string {
-		const ext = filename.split('.').pop()?.toLowerCase();
-		const mimeTypes: {[key: string]: string} = {
-			'jpg': 'image/jpeg',
-			'jpeg': 'image/jpeg',
-			'png': 'image/png',
-			'gif': 'image/gif',
-			'svg': 'image/svg+xml',
-			'webp': 'image/webp',
-			'bmp': 'image/bmp',
-			'ico': 'image/x-icon',
-			'tiff': 'image/tiff',
-			'tif': 'image/tiff',
-			// 'pdf': 'application/pdf',
-			// 'zip': 'application/zip',
-			// 'rar': 'application/x-rar-compressed',
-			// '7z': 'application/x-7z-compressed',
-			// 'tar': 'application/x-tar',
-		};
-		return ext && mimeTypes[ext] ? mimeTypes[ext] : 'application/octet-stream';
-	}
-
 
 	// 从 URL 中提取 book_id 和 slug
 	extractParts(url: string): { book_id: string; slug: string } | null {
@@ -122,21 +94,11 @@ export default class MyPlugin extends Plugin {
 
 	async onload() {
 		await this.loadSettings();
-		// 加载 CSS 文件
 
 		console.log('Slug Plugin loaded');
 
 		// 语雀 Token
 		this.yuqueToken = this.settings.mySetting;
-		this.yuqueCookie = this.settings.yuqueCookie;
-
-		// 添加一个状态栏图标
-		// const statusBarItem = this.addStatusBarItem();
-		// statusBarItem.setText('Get Slug');
-		// statusBarItem.addEventListener('click', async () => {
-		// 	new Notice('This is a notice weepwood!');
-		// 	await this.handleSlugAction();
-		// });
 
 		// This creates an icon in the left ribbon.
 		// 上传到语雀
@@ -205,69 +167,11 @@ export default class MyPlugin extends Plugin {
 			}
 		});
 
-		// 图片上传到语雀
-		this.addRibbonIcon('image', 'Upload Image to Yuque', async (_evt: MouseEvent) => {
-			await this.handleImageUpload();
-		})
-
-
 		// Perform additional things with the ribbon
 		ribbonIconEl.addClass('my-plugin-ribbon-class');
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		// const statusBarItemEl = this.addStatusBarItem();
-		// statusBarItemEl.setText('Status Bar Text');
-
-		// This adds a simple command that can be triggered anywhere
-		// this.addCommand({
-		// 	id: 'open-sample-modal-simple',
-		// 	name: 'Open sample modal (simple)',
-		// 	callback: () => {
-		// 		new SampleModal(this.app).open();
-		// 	}
-		// });
-
-		// This adds an editor command that can perform some operation on the current editor instance
-		// this.addCommand({
-		// 	id: 'sample-editor-command',
-		// 	name: 'Sample editor command',
-		// 	editorCallback: (editor: Editor, view: MarkdownView) => {
-		// 		console.log(editor.getSelection());
-		// 		editor.replaceSelection('Sample Editor Command');
-		// 	}
-		// });
-
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		// this.addCommand({
-		// 	id: 'open-sample-modal-complex',
-		// 	name: 'Open sample modal (complex)',
-		// 	checkCallback: (checking: boolean) => {
-		// 		// Conditions to check
-		// 		const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-		// 		if (markdownView) {
-		// 			// If checking is true, we're simply "checking" if the command can be run.
-		// 			// If checking is false, then we want to actually perform the operation.
-		// 			if (!checking) {
-		// 				new SampleModal(this.app).open();
-		// 			}
-
-		// 			// This command will only show up in Command Palette when the check function returns true
-		// 			return true;
-		// 		}
-		// 	}
-		// });
-
 		// This adds a settings tab so the user can configure various aspects of the plugin
 		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		// this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-		// 	console.log('click', evt);
-		// });
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		// this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
 	}
 
 	// 获取文件的更新时间
@@ -376,12 +280,8 @@ export default class MyPlugin extends Plugin {
 					// 显示确认框
 					const confirmed = await ConfirmModal.show(this.app, '确定要上传到语雀吗？');
 					if (confirmed) {
-						// 上传前处理图片：扫描本地图片并上传到语雀 CDN
-						const processedContent = await this.processLocalImages(content, activeFile);
-						await this.putDoc(book_id, slug, processedContent, fileName);
+						await this.putDoc(book_id, slug, content, fileName);
 					}
-
-					// this.putDoc(book_id, slug, content, fileName);
 				} else {
 					this.displayMessage('Invalid Yuque link');
 				}
@@ -468,144 +368,6 @@ export default class MyPlugin extends Plugin {
 		return result;
 	}
 
-	// 解析相对图片路径为 vault 中的绝对路径
-	resolveAttachmentPath(imgPath: string, activeFile: TFile): string {
-		if (imgPath.startsWith('http://') || imgPath.startsWith('https://')) {
-			return imgPath; // 已经是网络 URL，不需要处理
-		}
-		// 处理 Obsidian 内部链接格式
-		if (imgPath.startsWith('app://')) {
-			return imgPath;
-		}
-		// 相对路径：相对于当前文件所在目录
-		if (!imgPath.startsWith('/')) {
-			const parentPath = activeFile.parent?.path || '';
-			return parentPath ? `${parentPath}/${imgPath}` : imgPath;
-		}
-		// 绝对路径（以 / 开头），去掉开头的 /
-		return imgPath.startsWith('/') ? imgPath.slice(1) : imgPath;
-	}
-
-	// 将图片上传到语雀 CDN
-	async uploadImage(vaultPath: string, fileName: string): Promise<string | null> {
-		try {
-			const fileData = await this.app.vault.adapter.readBinary(vaultPath);
-
-			// 构建 multipart/form-data 请求体
-			const boundary = '----yuque' + Math.random().toString(36).slice(2);
-
-			// 构建 multipart 头部
-			const headerStr = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: ${this.getMimeType(fileName)}\r\n\r\n`;
-			const footerStr = `\r\n--${boundary}--\r\n`;
-
-			const encoder = new TextEncoder();
-			const headerBytes = encoder.encode(headerStr);
-			const footerBytes = encoder.encode(footerStr);
-
-			const bodyBytes = new Uint8Array(headerBytes.byteLength + fileData.byteLength + footerBytes.byteLength);
-			bodyBytes.set(new Uint8Array(headerBytes), 0);
-			bodyBytes.set(new Uint8Array(fileData), headerBytes.byteLength);
-			bodyBytes.set(new Uint8Array(footerBytes), headerBytes.byteLength + fileData.byteLength);
-
-			console.log(`Uploading image: ${vaultPath} (${fileData.byteLength} bytes)`);
-
-			const response = await requestUrl({
-				url: 'https://www.yuque.com/api/upload/attach',
-				method: 'POST',
-				headers: {
-					'Referer': 'https://www.yuque.com',
-					'Cookie': this.yuqueCookie,
-					'Content-Type': `multipart/form-data; boundary=${boundary}`,
-				},
-				body: bodyBytes.buffer,
-			});
-
-			const result = response.json;
-			console.log('Image upload response:', result);
-
-			if (result.data && result.data.url) {
-				new Notice(`图片上传成功: ${fileName}`);
-				return result.data.url;
-			} else {
-				console.error('Image upload failed, unexpected response:', result);
-				new Notice(`图片上传失败: ${fileName}`);
-				return null;
-			}
-		} catch (error) {
-			console.error(`Image upload error for ${vaultPath}:`, error);
-			new Notice(`图片上传出错: ${fileName}`);
-			return null;
-		}
-	}
-
-	// 扫描 markdown 内容中的本地图片，上传并替换为 CDN URL
-	async processLocalImages(content: string, activeFile: TFile): Promise<string> {
-		// 匹配 Markdown 图片语法 ![](path) 和 HTML img 语法
-		const imageRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
-		let match;
-		let result = content;
-		const replacements: Array<{ from: string; to: string }> = [];
-
-		while ((match = imageRegex.exec(content)) !== null) {
-			const fullMatch = match[0];
-			const altText = match[1];
-			const imgPath = match[2].trim();
-
-			// 只处理本地图片（不是网络 URL）
-			if (imgPath.startsWith('http://') || imgPath.startsWith('https://')) {
-				continue;
-			}
-
-			const vaultPath = this.resolveAttachmentPath(imgPath, activeFile);
-			const fileName = imgPath.split('/').pop() || imgPath;
-
-			console.log(`Processing local image: ${imgPath} -> vault path: ${vaultPath}`);
-
-			const cdnUrl = await this.uploadImage(vaultPath, fileName);
-			if (cdnUrl) {
-				replacements.push({ from: fullMatch, to: `![${altText}](${cdnUrl})` });
-			}
-		}
-
-		// 从后往前替换，避免位置偏移
-		for (const { from, to } of replacements) {
-			result = result.replace(from, to);
-		}
-
-		if (replacements.length > 0) {
-			new Notice(`已处理 ${replacements.length} 张图片`);
-		}
-
-		return result;
-	}
-
-	// 处理图片上传（从 ribbon 图标触发）
-	async handleImageUpload() {
-		const activeFile = this.app.workspace.getActiveFile();
-		if (!activeFile) {
-			new Notice('没有活动文件');
-			return;
-		}
-
-		if (!this.yuqueCookie) {
-			new Notice('请先在设置中配置 Yuque Cookie');
-			return;
-		}
-
-		const content = await this.app.vault.read(activeFile);
-		const markdownContent = content.replace(/^---\s*([\s\S]*?)\s*---/, '');
-		const processedContent = await this.processLocalImages(markdownContent, activeFile);
-
-		// 如果图片被替换，更新文件
-		if (processedContent !== markdownContent) {
-			const yaml = this.parseYamlFrontmatter(content) as Record<string, string>;
-			const yamlStr = Object.entries(yaml).map(([key, value]) => `${key}: ${value}`).join('\n');
-			const newContent = `---\n${yamlStr}\n---\n${processedContent}`;
-			await this.app.vault.modify(activeFile, newContent);
-			new Notice('图片已上传并替换为 CDN 链接');
-		}
-	}
-
 	onunload() {
 	}
 
@@ -617,22 +379,6 @@ export default class MyPlugin extends Plugin {
 		await this.saveData(this.settings);
 	}
 }
-
-// class SampleModal extends Modal {
-// 	constructor(app: App) {
-// 		super(app);
-// 	}
-
-// 	onOpen() {
-// 		const {contentEl} = this;
-// 		contentEl.setText('Woah!');
-// 	}
-
-// 	onClose() {
-// 		const {contentEl} = this;
-// 		contentEl.empty();
-// 	}
-// }
 
 class SampleSettingTab extends PluginSettingTab {
 	plugin: MyPlugin;
@@ -660,21 +406,6 @@ class SampleSettingTab extends PluginSettingTab {
 				})
 				.inputEl.addEventListener('blur', () => {
 					new Notice('设置已更新');
-				}));
-
-		new Setting(containerEl)
-			.setName('Yuque Cookie')
-			.setDesc('从浏览器开发者工具复制的完整 Cookie 字符串（图片上传需要）')
-			.addText(text => text
-				.setPlaceholder('yuque_ctoken=...')
-				.setValue(this.plugin.settings.yuqueCookie)
-				.onChange(async (value) => {
-					this.plugin.settings.yuqueCookie = value;
-					await this.plugin.saveSettings();
-					this.plugin.yuqueCookie = value;
-				})
-				.inputEl.addEventListener('blur', () => {
-					new Notice('Cookie 已更新');
 				}));
 	}
 }
