@@ -15,15 +15,19 @@ npm run build        # production build: tsc typecheck + esbuild bundle + minify
 npm run version      # bump version (reads pkg version, updates manifest.json & versions.json)
 ```
 
-The CI workflow (`.github/workflows/webpack.yml`) runs `npm run build` on push/PR to master.
+The CI workflow (`.github/workflows/webpack.yml`) runs `npm run build` on push/PR to master, and creates a GitHub Release on tag push.
+
+## Skills
+
+- `/release` — 执行版本发布流程
 
 ## Project Structure
 
-- **`main.ts`** — Entire plugin lives in this single file (~520 lines). Three classes:
-  - `MyPlugin` (extends `Plugin`) — Main plugin class with three ribbon icon actions (upload to Yuque, download from Yuque, image upload placeholder), YAML frontmatter parser, Yuque API client methods.
+- **`main.ts`** — Entire plugin lives in this single file (~410 lines). Three classes:
+  - `MyPlugin` (extends `Plugin`) — Main plugin class with two ribbon icon actions (upload to Yuque, download from Yuque), YAML frontmatter parser, Yuque API client methods.
   - `ConfirmModal` (extends `Modal`) — Async confirmation dialog used before upload/download.
   - `SampleSettingTab` (extends `PluginSettingTab`) — Settings tab for configuring the Yuque API token.
-- **`esbuild.config.mjs`** — Build config (entry: `main.ts` → output: `dist/main.js`, CJS format, ES2018 target, tree shaking).
+- **`esbuild.config.mjs`** — Build config (entry: `main.ts` → output: `main.js`, CJS format, ES2018 target, tree shaking).
 - **`styles.css`** — Minimal plugin CSS (mostly empty, some scaffolding for button containers).
 - **`manifest.json`** — Obsidian plugin manifest (`id: yuque-sync`, `minAppVersion: 0.15.0`).
 - **`versions.json`** — Plugin version → min Obsidian version mapping for backward compatibility.
