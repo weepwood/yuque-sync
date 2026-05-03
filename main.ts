@@ -3,11 +3,12 @@ import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, requestUr
 // Remember to rename these classes and interfaces!
 interface MyPluginSettings {
 	mySetting: string;
+	yuqueCookie: string;
 }
 
 class ConfirmModal extends Modal {
-	resolve: (value: boolean) => void;
-	reject: (reason?: any) => void;
+	resolve!: (value: boolean) => void;
+	reject!: (reason?: unknown) => void;
 
 	constructor(app: App, private message: string, private html_message?: string) {
 		super(app);
@@ -60,16 +61,17 @@ class ConfirmModal extends Modal {
 }
 
 const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
+	mySetting: 'default',
+	yuqueCookie: ''
 }
 
 export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+	settings!: MyPluginSettings;
 
 
 	yuqueToken = '';
 	yuqueCookie = '';
-	
+
 	// 根据文件扩展名获取MIME类型
 	getMimeType(filename: string): string {
 		const ext = filename.split('.').pop()?.toLowerCase();
@@ -126,6 +128,7 @@ export default class MyPlugin extends Plugin {
 
 		// 语雀 Token
 		this.yuqueToken = this.settings.mySetting;
+		this.yuqueCookie = this.settings.yuqueCookie;
 
 		// 添加一个状态栏图标
 		// const statusBarItem = this.addStatusBarItem();
@@ -137,17 +140,17 @@ export default class MyPlugin extends Plugin {
 
 		// This creates an icon in the left ribbon.
 		// 上传到语雀
-		const ribbonIconEl = this.addRibbonIcon('cloud-upload', 'Upload Yuque', (evt: MouseEvent) => {
+		const ribbonIconEl = this.addRibbonIcon('cloud-upload', 'Upload Yuque', (_evt: MouseEvent) => {
 			// Called when the user clicks the icon.
 			this.handleAction();
 		});
 
 		// 从语雀下载
-		const ribbonIconEl2 = this.addRibbonIcon('cloud-download', 'Download Yuque', async (evt: MouseEvent) => {
+		this.addRibbonIcon('cloud-download', 'Download Yuque', async (_evt: MouseEvent) => {
 			const activeFile = this.app.workspace.getActiveFile();
 			if (activeFile) {
 				const local_mtime = await this.getFileMtime(activeFile);
-				
+
 				const yuque_link = await this.getYuqueLinkFromYaml(activeFile);
 				if (yuque_link) {
 					const parts = this.extractParts(yuque_link);
@@ -166,7 +169,7 @@ export default class MyPlugin extends Plugin {
 
 								// 获取当前文件内容
 								const fileContent = await this.app.vault.read(activeFile);
-								const yaml = this.parseYamlFrontmatter(fileContent);
+								const yaml = this.parseYamlFrontmatter(fileContent) as Record<string, string>;
 								// 增加 yuque_title 属性
 								yaml['yuque_title'] = title;
 
@@ -180,7 +183,7 @@ export default class MyPlugin extends Plugin {
 								await this.app.vault.create(`${activeFile.parent?.path}/${activeFile.basename}_${local_mtime_stamp}.md`, fileContent);
 
 								// await this.app.vault.create(activeFile.path, newContent);
-								
+
 								// 更新当前文件
 								await this.app.vault.modify(activeFile, newContent);
 
@@ -203,8 +206,8 @@ export default class MyPlugin extends Plugin {
 		});
 
 		// 图片上传到语雀
-		const ribbonIconEl3 = this.addRibbonIcon('image', 'Upload Image to Yuque', async (evt: MouseEvent) => {
-			
+		this.addRibbonIcon('image', 'Upload Image to Yuque', async (_evt: MouseEvent) => {
+			await this.handleImageUpload();
 		})
 
 
@@ -373,7 +376,9 @@ export default class MyPlugin extends Plugin {
 					// 显示确认框
 					const confirmed = await ConfirmModal.show(this.app, '确定要上传到语雀吗？');
 					if (confirmed) {
-						this.putDoc(book_id, slug, content, fileName);
+						// 上传前处理图片：扫描本地图片并上传到语雀 CDN
+						const processedContent = await this.processLocalImages(content, activeFile);
+						await this.putDoc(book_id, slug, processedContent, fileName);
 					}
 
 					// this.putDoc(book_id, slug, content, fileName);
@@ -412,25 +417,25 @@ export default class MyPlugin extends Plugin {
 	async getSlugFromYaml(file: TFile): Promise<string | null> {
 		const fileContent = await this.app.vault.read(file);
 		const yaml = this.parseYamlFrontmatter(fileContent);
-		return yaml['slug'] || null;
+		return (yaml['slug'] as string) || null;
 	}
 
 	// 从文件的 YAML 前置元数据中获取 book_id 属性
 	async getBookIdFromYaml(file: TFile): Promise<string | null> {
 		const fileContent = await this.app.vault.read(file);
 		const yaml = this.parseYamlFrontmatter(fileContent);
-		return yaml['book_id'] || null;
+		return (yaml['book_id'] as string) || null;
 	}
 
 	// 从文件的 YAML 前置元数据中获取 yuque_link 属性
 	async getYuqueLinkFromYaml(file: TFile): Promise<string | null> {
 		const fileContent = await this.app.vault.read(file);
 		const yaml = this.parseYamlFrontmatter(fileContent);
-		return yaml['yuque_link'] || null;
+		return (yaml['yuque_link'] as string) || null;
 	}
 
 	// 解析 YAML 前置元数据
-	parseYamlFrontmatter(content: string): Record<string, any> {
+	parseYamlFrontmatter(content: string): Record<string, unknown> {
 		const yamlRegex = /^---\s*([\s\S]*?)\s*---/;
 		const match = content.match(yamlRegex);
 		if (match) {
@@ -441,9 +446,9 @@ export default class MyPlugin extends Plugin {
 	}
 
 	// 简单的 YAML 解析器
-	parseYaml(yamlString: string): Record<string, any> {
+	parseYaml(yamlString: string): Record<string, unknown> {
 		const lines = yamlString.split('\n');
-		const result: Record<string, any> = {};
+		const result: Record<string, unknown> = {};
 		let currentKey: string | null = null;
 
 		for (const line of lines) {
@@ -461,6 +466,144 @@ export default class MyPlugin extends Plugin {
 		}
 
 		return result;
+	}
+
+	// 解析相对图片路径为 vault 中的绝对路径
+	resolveAttachmentPath(imgPath: string, activeFile: TFile): string {
+		if (imgPath.startsWith('http://') || imgPath.startsWith('https://')) {
+			return imgPath; // 已经是网络 URL，不需要处理
+		}
+		// 处理 Obsidian 内部链接格式
+		if (imgPath.startsWith('app://')) {
+			return imgPath;
+		}
+		// 相对路径：相对于当前文件所在目录
+		if (!imgPath.startsWith('/')) {
+			const parentPath = activeFile.parent?.path || '';
+			return parentPath ? `${parentPath}/${imgPath}` : imgPath;
+		}
+		// 绝对路径（以 / 开头），去掉开头的 /
+		return imgPath.startsWith('/') ? imgPath.slice(1) : imgPath;
+	}
+
+	// 将图片上传到语雀 CDN
+	async uploadImage(vaultPath: string, fileName: string): Promise<string | null> {
+		try {
+			const fileData = await this.app.vault.adapter.readBinary(vaultPath);
+
+			// 构建 multipart/form-data 请求体
+			const boundary = '----yuque' + Math.random().toString(36).slice(2);
+
+			// 构建 multipart 头部
+			const headerStr = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: ${this.getMimeType(fileName)}\r\n\r\n`;
+			const footerStr = `\r\n--${boundary}--\r\n`;
+
+			const encoder = new TextEncoder();
+			const headerBytes = encoder.encode(headerStr);
+			const footerBytes = encoder.encode(footerStr);
+
+			const bodyBytes = new Uint8Array(headerBytes.byteLength + fileData.byteLength + footerBytes.byteLength);
+			bodyBytes.set(new Uint8Array(headerBytes), 0);
+			bodyBytes.set(new Uint8Array(fileData), headerBytes.byteLength);
+			bodyBytes.set(new Uint8Array(footerBytes), headerBytes.byteLength + fileData.byteLength);
+
+			console.log(`Uploading image: ${vaultPath} (${fileData.byteLength} bytes)`);
+
+			const response = await requestUrl({
+				url: 'https://www.yuque.com/api/upload/attach',
+				method: 'POST',
+				headers: {
+					'Referer': 'https://www.yuque.com',
+					'Cookie': this.yuqueCookie,
+					'Content-Type': `multipart/form-data; boundary=${boundary}`,
+				},
+				body: bodyBytes.buffer,
+			});
+
+			const result = response.json;
+			console.log('Image upload response:', result);
+
+			if (result.data && result.data.url) {
+				new Notice(`图片上传成功: ${fileName}`);
+				return result.data.url;
+			} else {
+				console.error('Image upload failed, unexpected response:', result);
+				new Notice(`图片上传失败: ${fileName}`);
+				return null;
+			}
+		} catch (error) {
+			console.error(`Image upload error for ${vaultPath}:`, error);
+			new Notice(`图片上传出错: ${fileName}`);
+			return null;
+		}
+	}
+
+	// 扫描 markdown 内容中的本地图片，上传并替换为 CDN URL
+	async processLocalImages(content: string, activeFile: TFile): Promise<string> {
+		// 匹配 Markdown 图片语法 ![](path) 和 HTML img 语法
+		const imageRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
+		let match;
+		let result = content;
+		const replacements: Array<{ from: string; to: string }> = [];
+
+		while ((match = imageRegex.exec(content)) !== null) {
+			const fullMatch = match[0];
+			const altText = match[1];
+			const imgPath = match[2].trim();
+
+			// 只处理本地图片（不是网络 URL）
+			if (imgPath.startsWith('http://') || imgPath.startsWith('https://')) {
+				continue;
+			}
+
+			const vaultPath = this.resolveAttachmentPath(imgPath, activeFile);
+			const fileName = imgPath.split('/').pop() || imgPath;
+
+			console.log(`Processing local image: ${imgPath} -> vault path: ${vaultPath}`);
+
+			const cdnUrl = await this.uploadImage(vaultPath, fileName);
+			if (cdnUrl) {
+				replacements.push({ from: fullMatch, to: `![${altText}](${cdnUrl})` });
+			}
+		}
+
+		// 从后往前替换，避免位置偏移
+		for (const { from, to } of replacements) {
+			result = result.replace(from, to);
+		}
+
+		if (replacements.length > 0) {
+			new Notice(`已处理 ${replacements.length} 张图片`);
+		}
+
+		return result;
+	}
+
+	// 处理图片上传（从 ribbon 图标触发）
+	async handleImageUpload() {
+		const activeFile = this.app.workspace.getActiveFile();
+		if (!activeFile) {
+			new Notice('没有活动文件');
+			return;
+		}
+
+		if (!this.yuqueCookie) {
+			new Notice('请先在设置中配置 Yuque Cookie');
+			return;
+		}
+
+		const content = await this.app.vault.read(activeFile);
+		const markdownContent = content.replace(/^---\s*([\s\S]*?)\s*---/, '');
+		const processedContent = await this.processLocalImages(markdownContent, activeFile);
+
+		// 如果图片被替换，更新文件
+		if (processedContent !== markdownContent) {
+			const yaml = this.parseYamlFrontmatter(content) as Record<string, string>;
+			const yamlStr = Object.entries(yaml).map(([key, value]) => `${key}: ${value}`).join('\n');
+			const newContent = `---\n${yamlStr}\n---\n${processedContent}`;
+			await this.app.vault.modify(activeFile, newContent);
+			new Notice('图片已上传并替换为 CDN 链接');
+		}
 	}
 
 	onunload() {
@@ -517,6 +660,21 @@ class SampleSettingTab extends PluginSettingTab {
 				})
 				.inputEl.addEventListener('blur', () => {
 					new Notice('设置已更新');
+				}));
+
+		new Setting(containerEl)
+			.setName('Yuque Cookie')
+			.setDesc('从浏览器开发者工具复制的完整 Cookie 字符串（图片上传需要）')
+			.addText(text => text
+				.setPlaceholder('yuque_ctoken=...')
+				.setValue(this.plugin.settings.yuqueCookie)
+				.onChange(async (value) => {
+					this.plugin.settings.yuqueCookie = value;
+					await this.plugin.saveSettings();
+					this.plugin.yuqueCookie = value;
+				})
+				.inputEl.addEventListener('blur', () => {
+					new Notice('Cookie 已更新');
 				}));
 	}
 }
