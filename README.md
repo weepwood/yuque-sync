@@ -6,6 +6,21 @@
 
 - **上传到语雀** — 将当前文件上传到语雀知识库，使用 YAML 前置元数据中的 `yuque_link` 确定目标文档
 - **从语雀下载** — 从语雀下载文档内容到当前文件，下载前自动备份原文件为 `{filename}_{timestamp}.md`，并自动添加 `yuque_title` 字段
+- **上传本地图片** — 使用语雀网页登录 Cookie 将 Markdown 中的本地图片上传到语雀并替换链接
+
+## ChatGPT / MCP 图片服务
+
+仓库的 [`mcp-server/`](mcp-server/) 目录提供独立的 Yuque Image MCP 服务，可将 ChatGPT 或其他 MCP 客户端中的图片上传到语雀，并创建包含原始提示词、实际生成提示词和元数据的图片档案文档。
+
+它支持：
+
+- 远程 Streamable HTTP MCP；
+- 本地 stdio MCP；
+- 单图和批量图片上传；
+- 创建或更新语雀图片文档；
+- Docker、Windows、Nginx、Cloudflare Tunnel 部署示例。
+
+安装、配置和套餐限制见 [`mcp-server/README.md`](mcp-server/README.md)。
 
 ## 使用方法
 
@@ -49,6 +64,15 @@
 npm install     # 安装依赖
 npm run dev     # 监听模式
 npm run build   # 生产构建
+```
+
+MCP 服务开发：
+
+```bash
+cd mcp-server
+npm install
+npm run check
+npm start
 ```
 
 ## 许可证
