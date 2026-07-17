@@ -1,0 +1,11 @@
+services:
+  yuque-image-mcp:
+    build: .
+    container_name: yuque-image-mcp
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      HOST: 0.0.0.0
+    ports:
+      - "127.0.0.1:8787:8787"

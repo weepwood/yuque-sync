@@ -1,0 +1,22 @@
+[Unit]
+Description=Yuque Image MCP Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=yuque-mcp
+Group=yuque-mcp
+WorkingDirectory=/opt/yuque-image-mcp
+EnvironmentFile=/opt/yuque-image-mcp/.env
+ExecStart=/usr/bin/node /opt/yuque-image-mcp/dist/src/http.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/yuque-image-mcp
+
+[Install]
+WantedBy=multi-user.target
