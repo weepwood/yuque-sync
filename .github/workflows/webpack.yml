@@ -3,57 +3,71 @@ name: Build and Release
 on:
   push:
     branches: [master]
-    tags: ["*"]
+    tags: ["v*"]
   pull_request:
     branches: [master]
   workflow_dispatch:
 
+concurrency:
+  group: yuque-sync-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node-version: [18.x, 20.x, 22.x]
+    permissions:
+      contents: read
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v4
-      with:
-        node-version: ${{ matrix.node-version }}
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
 
-    - name: Install dependencies
-      run: npm install
+      - name: Install dependencies
+        run: npm ci
 
-    - name: Build
-      run: npm run build
+      - name: Typecheck and build
+        run: npm run build
 
-    - name: Verify build output
-      run: 'test -f main.js || echo "Build failed: main.js not found"'
+      - name: Verify build output
+        run: test -s main.js
+
+      - name: Upload plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: yuque-sync-${{ github.sha }}
+          path: |
+            main.js
+            manifest.json
+            styles.css
+          if-no-files-found: error
 
   release:
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: build
+    runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Install dependencies
-      run: npm install
+      - name: Verify release versions
+        run: |
+          node -e "const p=require('./package.json');const m=require('./manifest.json');const tag=process.env.GITHUB_REF_NAME.replace(/^v/,'');if(p.version!==m.version||p.version!==tag){throw new Error('package.json、manifest.json 与标签版本不一致')}"
 
-    - name: Build
-      run: npm run build
+      - name: Download plugin artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: yuque-sync-${{ github.sha }}
+          path: release-files
 
-    - name: Create Release
-      uses: softprops/action-gh-release@v2
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        files: |
-          main.js
-          manifest.json
-          styles.css
-        generate_release_notes: true
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-files/*
+          generate_release_notes: true

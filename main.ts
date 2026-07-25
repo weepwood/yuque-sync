@@ -1,718 +1,487 @@
-import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, requestUrl, ButtonComponent, Menu, Editor } from 'obsidian';
+import {
+	type Editor,
+	type MarkdownFileInfo,
+	type MarkdownView,
+	type Menu,
+	Notice,
+	Plugin,
+	type TAbstractFile,
+	TFile,
+	normalizePath,
+} from 'obsidian';
+import { ConfirmModal } from './src/confirm-modal';
+import {
+	describeError,
+	extractYuqueLocation,
+	findImageReferences,
+	formatFileTimestamp,
+	getStringProperty,
+	normalizeBookId,
+	readFrontmatter,
+	replaceImageReferences,
+	safeDecodeURIComponent,
+	splitMarkdown,
+} from './src/markdown-utils';
+import { YuqueSyncSettingTab } from './src/settings-tab';
+import { DEFAULT_SETTINGS, type ImageReference, type YuqueSyncSettings } from './src/types';
+import { YuqueClient } from './src/yuque-client';
 
-interface MyPluginSettings {
-	yuqueToken: string;
-	defaultBookId: string;
-	yuqueCookie: string;
-}
+const SUPPORTED_IMAGE_EXTENSIONS = new Set([
+	'png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'ico', 'tiff', 'tif',
+]);
 
-class ConfirmModal extends Modal {
-	resolve!: (value: boolean) => void;
-	reject!: (reason?: unknown) => void;
+export default class YuqueSyncPlugin extends Plugin {
+	settings: YuqueSyncSettings = { ...DEFAULT_SETTINGS };
 
-	constructor(app: App, private message: string, private html_message?: string) {
-		super(app);
-	}
+	private client!: YuqueClient;
+	private statusBarItem!: HTMLElement;
+	private statusTimer: number | null = null;
+	private operationInProgress = false;
 
-	onOpen() {
-		const { contentEl } = this;
-		contentEl.createEl('h3', { text: this.message });
-
-		// 添加一些文本内容
-		contentEl.createEl('p', { text: this.html_message });
-
-		// 创建按钮容器
-		const buttonContainer = contentEl.createDiv({ cls: 'yuque-sync-button-container' });
-
-		const confirmButton = new ButtonComponent(buttonContainer)
-			.setButtonText('确认')
-			.onClick(() => {
-				this.resolve(true);
-				this.close();
-			});
-
-		new ButtonComponent(buttonContainer)
-			.setButtonText('取消')
-			.onClick(() => {
-				this.resolve(false);
-				this.close();
-			});
-
-		// 添加内联样式以增加按钮之间的间距
-		// buttonContainer.style.display = 'flex';
-		// buttonContainer.style.justifyContent = 'space-between';
-		buttonContainer.style.marginTop = '10px'; // 调整顶部间距
-		confirmButton.buttonEl.style.marginRight = '20px'; // 调整按钮之间的间距
-	}
-
-	onClose() {
-		const { contentEl } = this;
-		contentEl.empty();
-	}
-
-	static async show(app: App, message: string, html_message?: string): Promise<boolean> {
-		return new Promise((resolve, reject) => {
-			const modal = new ConfirmModal(app, message, html_message);
-			modal.resolve = resolve;
-			modal.reject = reject;
-			modal.open();
-		});
-	}
-}
-
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	yuqueToken: '',
-	defaultBookId: '',
-	yuqueCookie: '',
-}
-
-export default class MyPlugin extends Plugin {
-	settings!: MyPluginSettings;
-
-	yuqueToken = '';
-
-	statusBarItem: HTMLElement;
-
-	// 从 URL 中提取 book_id 和 slug
-	extractParts(url: string): { book_id: string; slug: string } | null {
-		// 确保 URL 以 https://www.yuque.com/ 开头
-		if (!url.startsWith("https://www.yuque.com/")) {
-			return null;
-		}
-
-		// 去掉前缀部分
-		const remaining = url.slice("https://www.yuque.com/".length);
-
-		// 按 '/' 分割字符串
-		const parts = remaining.split("/");
-
-		// 提取 weepwood/test 和 string
-		if (parts.length >= 2) {
-			const book_id = `${parts[0]}/${parts[1]}`; // weepwood/test
-			const slug = parts[2]; // string
-			console.log(book_id, slug);
-			return { book_id, slug };
-		}
-
-		return null;
-	}
-
-	async onload() {
+	async onload(): Promise<void> {
 		await this.loadSettings();
+		this.client = new YuqueClient(
+			() => this.settings.yuqueToken,
+			() => this.settings.yuqueCookie,
+		);
+		this.statusBarItem = this.addStatusBarItem();
+		this.statusBarItem.addClass('yuque-sync-status');
 
-		console.log('Slug Plugin loaded');
-
-		// 语雀 Token
-		this.yuqueToken = this.settings.yuqueToken;
-
-		// This creates an icon in the left ribbon.
-		// 上传到语雀
-		const ribbonIconEl = this.addRibbonIcon('cloud-upload', 'Upload Yuque', (_evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			this.handleAction();
+		this.addRibbonIcon('cloud-upload', '上传当前文档到语雀', () => {
+			void this.runExclusive('正在上传文档', () => this.uploadActiveDocument());
+		});
+		this.addRibbonIcon('cloud-download', '从语雀下载当前文档', () => {
+			void this.runExclusive('正在下载文档', () => this.downloadActiveDocument());
 		});
 
-		// 从语雀下载
-		this.addRibbonIcon('cloud-download', 'Download Yuque', async (_evt: MouseEvent) => {
-			const activeFile = this.app.workspace.getActiveFile();
-			if (activeFile) {
-				const local_mtime = await this.getFileMtime(activeFile);
-
-				const yuque_link = await this.getYuqueLinkFromYaml(activeFile);
-				if (yuque_link) {
-					const parts = this.extractParts(yuque_link);
-					if (parts) {
-						const { book_id, slug } = parts;
-						const yuque_mtime = await this.getDocMtime(book_id, slug);
-						console.log("本地端时间: " + local_mtime);
-						console.log("语雀端时间: " + yuque_mtime);
-						new Notice(`本地端时间: ${local_mtime}\n语雀端时间: ${yuque_mtime}`);
-						const confirmed = await ConfirmModal.show(this.app, '确定要下载吗？', `本地端时间: ${local_mtime} \n 语雀端时间: ${yuque_mtime}`);
-						if (confirmed) {
-							const doc = await this.getDoc(book_id, slug);
-							if (doc) {
-								const { title, content } = doc;
-								console.log(title, content);
-
-								// 获取当前文件内容
-								const fileContent = await this.app.vault.read(activeFile);
-								const yaml = this.parseYamlFrontmatter(fileContent) as Record<string, string>;
-								// 增加 yuque_title 属性
-								yaml['yuque_title'] = title;
-
-								// 保留 YAML 前置元数据并更新内容
-								const newContent = `---\n${Object.entries(yaml).map(([key, value]) => `${key}: ${value}`).join('\n')}\n---\n${content}`;
-
-								// 获取当前时间戳
-								const local_mtime_stamp = new Date(local_mtime).getTime();
-
-								// 复制当前文件 const copyFile
-								await this.app.vault.create(`${activeFile.parent?.path}/${activeFile.basename}_${local_mtime_stamp}.md`, fileContent);
-
-								// await this.app.vault.create(activeFile.path, newContent);
-
-								// 更新当前文件
-								await this.app.vault.modify(activeFile, newContent);
-
-								new Notice('文件更新成功');
-							} else {
-								new Notice('下载失败');
-							}
-						} else {
-							new Notice('操作已取消');
-						}
-					} else {
-						new Notice('Invalid Yuque link');
-					}
-				} else {
-					new Notice('No Yuque link found');
-				}
-			} else {
-				new Notice('没有活动文件');
-			}
-		});
-
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
-
-		// 注册右键菜单 - 上传图片到语雀
-		this.registerEvent(this.app.workspace.on('editor-menu', (menu: Menu, editor: Editor, view) => {
-			if (!this.settings.yuqueCookie) return;
-
-			const cursor = editor.getCursor();
-			const line = editor.getLine(cursor.line);
-
-			// 查找当前行的图片语法 ![alt](path)
-			const imageRegex = /!\[.*?\]\(([^)]+)\)/g;
-			let match: RegExpExecArray | null;
-			let imagePath: string | null = null;
-			while ((match = imageRegex.exec(line)) !== null) {
-				if (cursor.ch >= match.index && cursor.ch <= match.index + match[0].length) {
-					imagePath = match[1];
-					break;
-				}
-			}
-
-			if (!imagePath) return;
-			// 跳过已上线的图片
-			if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) return;
-
-			// 在异步回调外捕获当前位置信息
-			const currentMatch = match;
-			const parenPos = currentMatch ? currentMatch[0].indexOf('(') : 0;
-			const matchLen = currentMatch ? currentMatch[0].length : 0;
-
-			menu.addItem((item) => {
-				item.setTitle('上传到语雀')
-					.setIcon('upload')
-					.onClick(async () => {
-						const activeFile = view.file;
-						if (!activeFile) return;
-
-						// 解析图片路径
-						const resolvedFile = this.app.metadataCache.getFirstLinkpathDest(decodeURIComponent(imagePath!), activeFile.path);
-						if (!resolvedFile) {
-							new Notice('无法解析图片路径');
-							return;
-						}
-
-						const url = await this.uploadImageToYuque(resolvedFile);
-						if (url) {
-							// 替换编辑器中的图片路径
-							const from = { line: cursor.line, ch: currentMatch!.index + parenPos + 1 };
-							const to = { line: cursor.line, ch: currentMatch!.index + matchLen - 1 };
-							editor.replaceRange(url, from, to);
-							new Notice('图片已上传到语雀');
-						}
-					});
-			});
-		}));
-
-		// 注册文件右键菜单 - 上传所有图片到语雀
-		this.registerEvent(this.app.workspace.on('file-menu', (menu: Menu, file: TFile) => {
-			if (!this.settings.yuqueCookie) return;
-			if (file.extension !== 'md') return;
-
-			menu.addItem((item) => {
-				item.setTitle('上传所有图片到语雀')
-					.setIcon('upload')
-					.onClick(async () => {
-						const confirmed = await ConfirmModal.show(this.app, '确定要上传本文档中的所有图片到语雀吗？');
-						if (confirmed) {
-							await this.uploadAllImagesInFile(file);
-						}
-					});
-			});
-		}));
-
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-	}
-
-	// 获取文件的更新时间
-	// 修改 getFileMtime 方法，使其接收 TFile 而不是 Stat
-	async getFileMtime(file: TFile): Promise<string> {
-		const stat = await this.app.vault.adapter.stat(file.path);
-		if (!stat) {
-			console.error('无法获取文件状态:', file.path);
-			return '未知';
-		}
-		const mtime = stat.mtime;
-		const date = new Date(mtime);
-		return date.toLocaleString(); // 转换为本地日期时间格式
-	}
-
-	// 上传到语雀
-	async putDoc(book_id: string, slug: string, content: string, fileName: string) {
-		console.log(this.yuqueToken);
-		const body = {
-			title: fileName,
-			public: "0",
-			format: "markdown",
-			body: content
-		};
-
-		requestUrl({
-			url: `https://www.yuque.com/api/v2/repos/${book_id}/docs/${slug}`,
-			method: 'PUT',
-			headers: {
-				'Content-Type': 'application/json',
-				'X-Auth-Token': this.yuqueToken,
+		this.addCommand({
+			id: 'upload-active-document',
+			name: '上传当前文档到语雀',
+			callback: () => {
+				void this.runExclusive('正在上传文档', () => this.uploadActiveDocument());
 			},
-			body: JSON.stringify(body)
-		}).then((response) => {
-			console.log(response);
-			new Notice('上传成功');
-		}).catch((error) => {
-			console.error(error);
-			new Notice('上传失败');
 		});
-	}
-
-	// 在语雀创建新文档
-	async createDoc(book_id: string, title: string, content: string): Promise<{ slug: string; id: number } | null> {
-		try {
-			const response = await requestUrl({
-				url: `https://www.yuque.com/api/v2/repos/${book_id}/docs`,
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					'X-Auth-Token': this.yuqueToken,
-				},
-				body: JSON.stringify({
-					title: title,
-					public: "0",
-					format: "markdown",
-					body: content
-				})
-			});
-			const data = response.json.data;
-			new Notice('创建成功');
-			return { slug: data.slug, id: data.id };
-		} catch (error) {
-			console.error(error);
-			new Notice('创建文档失败');
-			return null;
-		}
-	}
-
-	// 将文档添加到知识库目录（TOC）
-	async addDocToToc(book_id: string, doc_id: number): Promise<boolean> {
-		try {
-			await requestUrl({
-				url: `https://www.yuque.com/api/v2/repos/${book_id}/toc`,
-				method: 'PUT',
-				headers: {
-					'Content-Type': 'application/json',
-					'X-Auth-Token': this.yuqueToken,
-				},
-				body: JSON.stringify({
-					action: "appendNode",
-					action_mode: "sibling",
-					type: "DOC",
-					doc_ids: [doc_id]
-				})
-			});
-			return true;
-		} catch (error) {
-			console.error('TOC 更新失败', error);
-			return false;
-		}
-	}
-
-	// 上传图片到语雀
-	async uploadImageToYuque(file: TFile): Promise<string | null> {
-		try {
-			const imageExts = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'ico', 'tiff', 'tif'];
-			if (!imageExts.includes(file.extension.toLowerCase())) {
-				console.error('不支持的文件类型:', file.extension);
-				return null;
-			}
-			const fileData = await this.app.vault.readBinary(file);
-
-			// 手动构建 multipart/form-data 请求体
-			const boundary = 'YuqueSync' + Math.random().toString(36).substring(2);
-			const headerStr = '--' + boundary + '\r\nContent-Disposition: form-data; name="file"; filename="' + file.name + '"\r\nContent-Type: application/octet-stream\r\n\r\n';
-			const footerStr = '\r\n--' + boundary + '--\r\n';
-
-			const encoder = new TextEncoder();
-			const headerBytes = encoder.encode(headerStr);
-			const footerBytes = encoder.encode(footerStr);
-			const bodyBuffer = new Uint8Array(headerBytes.length + fileData.byteLength + footerBytes.length);
-
-			bodyBuffer.set(headerBytes, 0);
-			bodyBuffer.set(new Uint8Array(fileData), headerBytes.length);
-			bodyBuffer.set(footerBytes, headerBytes.length + fileData.byteLength);
-
-			const response = await requestUrl({
-				url: 'https://www.yuque.com/api/upload/attach',
-				method: 'POST',
-				headers: {
-					'Referer': 'https://www.yuque.com',
-					'Cookie': this.settings.yuqueCookie,
-					'Content-Type': 'multipart/form-data; boundary=' + boundary,
-				},
-				body: bodyBuffer.buffer as ArrayBuffer
-			});
-
-			const result = response.json;
-			if (result.data && result.data.url) {
-				new Notice('图片上传成功');
-				return result.data.url;
-			}
-			console.error('图片上传返回异常', result);
-			new Notice('图片上传失败：接口返回异常');
-			return null;
-		} catch (error) {
-			console.error(error);
-			new Notice('图片上传失败');
-			return null;
-		}
-	}
-
-	// 上传文档中的所有图片到语雀
-	async uploadAllImagesInFile(file: TFile): Promise<void> {
-		try {
-			const content = await this.app.vault.read(file);
-			const imageRegex = /!\[.*?\]\(([^)]+)\)/g;
-
-			// 找出所有本地图片路径（去重）
-			const imagePaths = new Set<string>();
-			let match: RegExpExecArray | null;
-			while ((match = imageRegex.exec(content)) !== null) {
-				const path = match[1];
-				if (path.startsWith('http://') || path.startsWith('https://')) continue;
-				imagePaths.add(path);
-			}
-
-			if (imagePaths.size === 0) {
-				new Notice('未找到本地图片');
-				return;
-			}
-
-			const total = imagePaths.size;
-			this.statusBarItem.setText('正在上传图片：0/' + total);
-
-			// 逐张上传
-			const replacements: Array<{ local: string; url: string }> = [];
-			let failCount = 0;
-			let current = 0;
-
-			for (const imagePath of imagePaths) {
-				current++;
-				this.statusBarItem.setText('正在上传图片：' + current + '/' + total + ' - ' + imagePath);
-
-				const decodedPath = decodeURIComponent(imagePath);
-				const resolvedFile = this.app.metadataCache.getFirstLinkpathDest(decodedPath, file.path);
-				if (!resolvedFile) {
-					console.error('无法解析图片路径:', imagePath);
-					failCount++;
-					continue;
+		this.addCommand({
+			id: 'download-active-document',
+			name: '从语雀下载当前文档',
+			callback: () => {
+				void this.runExclusive('正在下载文档', () => this.downloadActiveDocument());
+			},
+		});
+		this.addCommand({
+			id: 'upload-all-images-in-active-document',
+			name: '上传当前文档中的所有本地图片',
+			callback: () => {
+				const file = this.getActiveMarkdownFile();
+				if (file) {
+					void this.runExclusive('正在上传图片', () => this.uploadAllImagesInFile(file));
 				}
+			},
+		});
 
-				const url = await this.uploadImageToYuque(resolvedFile);
-				if (url) {
-					replacements.push({ local: imagePath, url: url });
-				} else {
-					failCount++;
-				}
-			}
+		this.registerEditorImageMenu();
+		this.registerFileImageMenu();
+		this.addSettingTab(new YuqueSyncSettingTab(this.app, this));
+	}
 
-			if (replacements.length === 0) {
-				this.statusBarItem.setText('图片上传失败');
-				setTimeout(() => this.statusBarItem.setText(''), 5000);
-				new Notice('所有图片上传失败');
-				return;
-			}
-
-			// 替换文件中的路径
-			let newContent = content;
-			for (const { local, url } of replacements) {
-				newContent = newContent.split('(' + local + ')').join('(' + url + ')');
-			}
-			await this.app.vault.modify(file, newContent);
-
-			const successCount = replacements.length;
-			this.statusBarItem.setText('图片上传完成：成功 ' + successCount + ' 张' + (failCount > 0 ? '，失败 ' + failCount + ' 张' : ''));
-			setTimeout(() => this.statusBarItem.setText(''), 8000);
-			new Notice('上传完成：成功 ' + successCount + ' 张' + (failCount > 0 ? '，失败 ' + failCount + ' 张' : ''));
-		} catch (error) {
-			this.statusBarItem.setText('图片上传失败');
-			setTimeout(() => this.statusBarItem.setText(''), 5000);
-			console.error(error);
-			new Notice('上传图片失败');
+	onunload(): void {
+		if (this.statusTimer !== null) {
+			window.clearTimeout(this.statusTimer);
 		}
 	}
 
-	// 获取语雀文档
-	async getDoc(book_id: string, slug: string): Promise<{ title: string; content: string } | null> {
-		try {
-			const response = await requestUrl({
-				url: `https://www.yuque.com/api/v2/repos/${book_id}/docs/${slug}`,
-				method: 'GET',
-				headers: {
-					'Content-Type': 'application/json',
-					'X-Auth-Token': this.yuqueToken,
-				}
-			});
-
-			const data = response.json.data;
-			console.log(data); // 修改为输出对象而不是字符串
-			const title = data.title || '';
-			const content = data.body || '';
-			new Notice('下载成功');
-			return { title, content };
-		} catch (error) {
-			console.error(error);
-			new Notice('下载失败');
-			return null; // 确保总是返回一个值
-		}
+	async loadSettings(): Promise<void> {
+		const saved = await this.loadData() as (Partial<YuqueSyncSettings> & { mySetting?: string }) | null;
+		const migratedToken = saved?.yuqueToken || saved?.mySetting || '';
+		this.settings = {
+			...DEFAULT_SETTINGS,
+			...saved,
+			yuqueToken: migratedToken,
+		};
 	}
 
-	// 获取语雀文档的更新时间
-	async getDocMtime(book_id: string, slug: string): Promise<string> {
-		try {
-			const response = await requestUrl({
-				url: `https://www.yuque.com/api/v2/repos/${book_id}/docs/${slug}`,
-				method: 'GET',
-				headers: {
-					'Content-Type': 'application/json',
-					'X-Auth-Token': this.yuqueToken,
-				}
-			});
-
-			console.log(response);
-			const date = new Date(response.json.data.updated_at);
-			new Notice('获取成功');
-			return date.toLocaleString();
-		} catch (error) {
-			console.error(error);
-			new Notice('获取失败');
-			return '未知';
-		}
-	}
-
-
-	// 处理点击事件，获取 slug 并显示消息
-	async handleAction() {
-		const activeFile = this.app.workspace.getActiveFile();
-		if (activeFile) {
-			const yuque_link = await this.getYuqueLinkFromYaml(activeFile);
-			const content = await this.getMarkdownContent(activeFile);
-			const fileName = await this.getFileName(activeFile);
-
-			console.log(yuque_link);
-
-			if (yuque_link) {
-				const parts = this.extractParts(yuque_link);
-				if (parts) {
-					const { book_id, slug } = parts;
-					// 显示确认框
-					const confirmed = await ConfirmModal.show(this.app, '确定要上传到语雀吗？');
-					if (confirmed) {
-						await this.putDoc(book_id, slug, content, fileName);
-					}
-				} else {
-					this.displayMessage('Invalid Yuque link');
-				}
-			} else {
-				// 没有 yuque_link，创建新文档
-				if (!this.settings.defaultBookId) {
-					new Notice('请先在设置中配置默认知识库');
-					return;
-				}
-				const confirmed = await ConfirmModal.show(this.app, '语雀链接不存在，是否创建新文档？');
-				if (confirmed) {
-					const result = await this.createDoc(this.settings.defaultBookId, fileName, content);
-					if (result) {
-						// 添加到知识库目录（TOC）
-						const tocOk = await this.addDocToToc(this.settings.defaultBookId, result.id);
-						if (!tocOk) {
-							new Notice('文档已创建，但添加到目录失败，请手动在语雀中调整目录');
-						}
-
-						const newYuqueLink = `https://www.yuque.com/${this.settings.defaultBookId}/${result.slug}`;
-						// 更新文件 frontmatter
-						const fileContent = await this.app.vault.read(activeFile);
-						const yaml = this.parseYamlFrontmatter(fileContent) as Record<string, string>;
-						yaml['yuque_link'] = newYuqueLink;
-						const newContent = `---\n${Object.entries(yaml).map(([key, value]) => `${key}: ${value}`).join('\n')}\n---\n${content}`;
-						await this.app.vault.modify(activeFile, newContent);
-						new Notice('文档已创建并同步到语雀');
-					}
-				}
-			}
-		} else {
-			this.displayMessage('No active file');
-		}
-	}
-
-	// 显示消息
-	displayMessage(message: string) {
-		new Notice(message);
-	}
-
-	// 获取 MarkDown 内容 不包括 YAML 前置元数据
-	async getMarkdownContent(file: TFile): Promise<string> {
-		const fileContent = await this.app.vault.read(file);
-		const yaml = this.parseYamlFrontmatter(fileContent);
-		const content = fileContent.replace(/^---\s*([\s\S]*?)\s*---/, '');
-		console.log("MarkDown: " + content);
-		console.log("YAML: " + yaml);
-		return content;
-	}
-
-	// 获取文件名称
-	async getFileName(file: TFile): Promise<string> {
-		return file.basename;
-	}
-
-	// 从文件的 YAML 前置元数据中获取 slug 属性
-	async getSlugFromYaml(file: TFile): Promise<string | null> {
-		const fileContent = await this.app.vault.read(file);
-		const yaml = this.parseYamlFrontmatter(fileContent);
-		return (yaml['slug'] as string) || null;
-	}
-
-	// 从文件的 YAML 前置元数据中获取 book_id 属性
-	async getBookIdFromYaml(file: TFile): Promise<string | null> {
-		const fileContent = await this.app.vault.read(file);
-		const yaml = this.parseYamlFrontmatter(fileContent);
-		return (yaml['book_id'] as string) || null;
-	}
-
-	// 从文件的 YAML 前置元数据中获取 yuque_link 属性
-	async getYuqueLinkFromYaml(file: TFile): Promise<string | null> {
-		const fileContent = await this.app.vault.read(file);
-		const yaml = this.parseYamlFrontmatter(fileContent);
-		return (yaml['yuque_link'] as string) || null;
-	}
-
-	// 解析 YAML 前置元数据
-	parseYamlFrontmatter(content: string): Record<string, unknown> {
-		const yamlRegex = /^---\s*([\s\S]*?)\s*---/;
-		const match = content.match(yamlRegex);
-		if (match) {
-			const yamlString = match[1];
-			return this.parseYaml(yamlString);
-		}
-		return {};
-	}
-
-	// 简单的 YAML 解析器
-	parseYaml(yamlString: string): Record<string, unknown> {
-		const lines = yamlString.split('\n');
-		const result: Record<string, unknown> = {};
-		let currentKey: string | null = null;
-
-		for (const line of lines) {
-			const trimmedLine = line.trim();
-			if (!trimmedLine) continue;
-
-			if (trimmedLine.includes(':')) {
-				const [key, value] = trimmedLine.split(/:(.*)/).map(s => s.trim());
-				currentKey = key;
-				result[key] = value || true; // 如果没有值，默认为 true
-			} else if (currentKey) {
-				// 处理多行值
-				result[currentKey] += '\n' + trimmedLine;
-			}
-		}
-
-		return result;
-	}
-
-	onunload() {
-	}
-
-	async loadSettings() {
-		const data = await this.loadData();
-		// 从旧格式 mySetting 迁移
-		if (data && data.mySetting && !data.yuqueToken) {
-			data.yuqueToken = data.mySetting;
-		}
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
-	}
-
-	async saveSettings() {
+	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
 	}
-}
 
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
+	private async runExclusive(label: string, operation: () => Promise<void>): Promise<void> {
+		if (this.operationInProgress) {
+			new Notice('已有语雀同步任务正在执行，请等待当前任务完成');
+			return;
+		}
 
-	constructor(app: App, plugin: MyPlugin) {
-		super(app, plugin);
-		this.plugin = plugin;
+		this.operationInProgress = true;
+		this.setStatus(`${label}…`);
+		try {
+			await operation();
+		} catch (error) {
+			console.error('[Yuque Sync] 操作失败', error);
+			const message = describeError(error);
+			new Notice(`语雀同步失败：${message}`);
+			this.setStatus(`语雀同步失败：${message}`, 5000);
+		} finally {
+			this.operationInProgress = false;
+			if (this.statusBarItem.textContent === `${label}…`) {
+				this.setStatus('');
+			}
+		}
 	}
 
-	display(): void {
-		const {containerEl} = this;
+	private async uploadActiveDocument(): Promise<void> {
+		this.requireToken();
+		const file = this.getActiveMarkdownFile();
+		if (!file) {
+			return;
+		}
 
-		containerEl.empty();
+		const initialContent = await this.app.vault.read(file);
+		const yuqueLink = getStringProperty(readFrontmatter(initialContent), 'yuque_link');
 
-		new Setting(containerEl)
-			.setName('Yuque Token')
-			.setDesc('https://www.yuque.com/settings/tokens')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.yuqueToken)
-				.onChange(async (value) => {
-					this.plugin.settings.yuqueToken = value;
-					await this.plugin.saveSettings();
-					this.plugin.yuqueToken = value; // 更新 yuqueToken
-				})
-				.inputEl.addEventListener('blur', () => {
-					new Notice('设置已更新');
+		if (yuqueLink) {
+			const location = extractYuqueLocation(yuqueLink);
+			if (!location) {
+				throw new Error('yuque_link 不是有效的语雀文档地址');
+			}
+			const confirmed = await ConfirmModal.show(
+				this.app,
+				'上传到语雀？',
+				`将使用本地内容覆盖语雀文档：${file.basename}`,
+			);
+			if (!confirmed) {
+				return;
+			}
+
+			const latestContent = await this.app.vault.read(file);
+			const latestLink = getStringProperty(readFrontmatter(latestContent), 'yuque_link');
+			if (latestLink !== yuqueLink) {
+				throw new Error('确认期间 yuque_link 已发生变化，请重新执行上传');
+			}
+			await this.client.updateDocument(
+				location.bookId,
+				location.slug,
+				file.basename,
+				splitMarkdown(latestContent).body,
+			);
+			new Notice('文档已上传到语雀');
+			this.setStatus('文档上传完成', 3000);
+			return;
+		}
+
+		const bookId = normalizeBookId(this.settings.defaultBookId);
+		if (!bookId) {
+			throw new Error('请在设置中填写格式为 namespace/book 的默认知识库');
+		}
+		const confirmed = await ConfirmModal.show(
+			this.app,
+			'创建语雀文档？',
+			`当前文件没有 yuque_link，将在 ${bookId} 中创建新文档。`,
+		);
+		if (!confirmed) {
+			return;
+		}
+
+		const latestContent = await this.app.vault.read(file);
+		if (getStringProperty(readFrontmatter(latestContent), 'yuque_link')) {
+			throw new Error('确认期间当前文件已关联语雀文档，请重新执行上传');
+		}
+		const created = await this.client.createDocument(
+			bookId,
+			file.basename,
+			splitMarkdown(latestContent).body,
+		);
+		const addedToToc = await this.client.addDocumentToToc(bookId, created.id);
+		const newYuqueLink = `https://www.yuque.com/${bookId}/${created.slug}`;
+
+		let linkBeforeWrite: string | null;
+		try {
+			const contentBeforeLinkWrite = await this.app.vault.read(file);
+			linkBeforeWrite = getStringProperty(readFrontmatter(contentBeforeLinkWrite), 'yuque_link');
+		} catch (error) {
+			throw new Error(
+				`语雀文档已创建，但无法验证本地元数据，因此未写回链接。新文档：${newYuqueLink}。原因：${describeError(error)}`,
+			);
+		}
+		if (linkBeforeWrite) {
+			throw new Error(
+				`语雀文档已创建，但本地 yuque_link 在同步期间发生变化，因此未覆盖。新文档：${newYuqueLink}`,
+			);
+		}
+
+		await this.app.fileManager.processFrontMatter(file, (metadata) => {
+			metadata.yuque_link = newYuqueLink;
+			metadata.yuque_title = file.basename;
+		});
+
+		new Notice(addedToToc
+			? '文档已创建并加入语雀目录'
+			: '文档已创建，但未能自动加入语雀目录');
+		this.setStatus('文档创建完成', 3000);
+	}
+
+	private async downloadActiveDocument(): Promise<void> {
+		this.requireToken();
+		const file = this.getActiveMarkdownFile();
+		if (!file) {
+			return;
+		}
+
+		const localContent = await this.app.vault.read(file);
+		const yuqueLink = getStringProperty(readFrontmatter(localContent), 'yuque_link');
+		if (!yuqueLink) {
+			throw new Error('当前文件缺少 yuque_link');
+		}
+		const location = extractYuqueLocation(yuqueLink);
+		if (!location) {
+			throw new Error('yuque_link 不是有效的语雀文档地址');
+		}
+
+		const document = await this.client.getDocument(location.bookId, location.slug);
+		const remoteTimestamp = Date.parse(document.updatedAt);
+		const localTimestamp = file.stat.mtime;
+		const localLabel = new Date(localTimestamp).toLocaleString();
+		const remoteLabel = Number.isNaN(remoteTimestamp)
+			? '未知'
+			: new Date(remoteTimestamp).toLocaleString();
+		const relation = Number.isNaN(remoteTimestamp)
+			? '无法比较修改时间'
+			: remoteTimestamp > localTimestamp
+				? '语雀版本较新'
+				: remoteTimestamp < localTimestamp
+					? '本地版本较新，请确认是否覆盖'
+					: '两端修改时间相同';
+
+		const confirmed = await ConfirmModal.show(
+			this.app,
+			'从语雀下载并覆盖本地文件？',
+			`${relation}\n本地：${localLabel}\n语雀：${remoteLabel}\n覆盖前会创建备份。`,
+		);
+		if (!confirmed) {
+			return;
+		}
+
+		const confirmedLocalContent = await this.app.vault.read(file);
+		if (confirmedLocalContent !== localContent) {
+			throw new Error('下载确认期间本地文档已发生变化，请重新执行下载');
+		}
+		const backupPath = await this.createBackup(file, confirmedLocalContent);
+		const contentBeforeReplace = await this.app.vault.read(file);
+		if (contentBeforeReplace !== confirmedLocalContent) {
+			throw new Error(`创建备份后本地文档又发生变化，已保留备份 ${backupPath}，未覆盖当前文件`);
+		}
+
+		const { frontmatterBlock } = splitMarkdown(confirmedLocalContent);
+		const remoteBody = splitMarkdown(document.content).body;
+		const nextContent = frontmatterBlock
+			? `${frontmatterBlock}\n${remoteBody}`
+			: remoteBody;
+		await this.app.vault.modify(file, nextContent);
+		await this.app.fileManager.processFrontMatter(file, (metadata) => {
+			metadata.yuque_link = yuqueLink;
+			metadata.yuque_title = document.title;
+			if (document.updatedAt) {
+				metadata.yuque_updated_at = document.updatedAt;
+			}
+		});
+
+		new Notice(`下载完成，原文件已备份到 ${backupPath}`);
+		this.setStatus('文档下载完成', 3000);
+	}
+
+	private async createBackup(file: TFile, content: string): Promise<string> {
+		const directory = file.parent?.path ?? '';
+		const timestamp = formatFileTimestamp(new Date());
+		let suffix = 0;
+		let backupPath = '';
+
+		do {
+			const postfix = suffix === 0 ? '' : `-${suffix}`;
+			backupPath = normalizePath(
+				[directory, `${file.basename}.backup-${timestamp}${postfix}.md`].filter(Boolean).join('/'),
+			);
+			suffix += 1;
+		} while (this.app.vault.getAbstractFileByPath(backupPath));
+
+		await this.app.vault.create(backupPath, content);
+		return backupPath;
+	}
+
+	private registerEditorImageMenu(): void {
+		this.registerEvent(this.app.workspace.on(
+			'editor-menu',
+			(menu: Menu, editor: Editor, info: MarkdownView | MarkdownFileInfo) => {
+				const file = info.file;
+				if (!file) {
+					return;
+				}
+				const cursor = editor.getCursor();
+				const line = editor.getLine(cursor.line);
+				const reference = findImageReferences(line).find((item) =>
+					cursor.ch >= item.fullStart && cursor.ch <= item.fullEnd,
+				);
+				if (!reference) {
+					return;
+				}
+
+				menu.addItem((item) => item
+					.setTitle('上传图片到语雀')
+					.setIcon('upload')
+					.onClick(() => {
+						void this.runExclusive('正在上传图片', () =>
+							this.uploadSingleImage(file, editor, cursor.line, reference));
+					}));
+			},
+		));
+	}
+
+	private registerFileImageMenu(): void {
+		this.registerEvent(this.app.workspace.on('file-menu', (menu: Menu, file: TAbstractFile) => {
+			if (!(file instanceof TFile) || file.extension !== 'md') {
+				return;
+			}
+			menu.addItem((item) => item
+				.setTitle('上传文档中的所有图片到语雀')
+				.setIcon('images')
+				.onClick(() => {
+					void this.runExclusive('正在上传图片', () => this.uploadAllImagesInFile(file));
 				}));
+		}));
+	}
 
-		new Setting(containerEl)
-			.setName('默认知识库')
-			.setDesc('语雀知识库 ID，例如 weepwood/test')
-			.addText(text => text
-				.setPlaceholder('weepwood/test')
-				.setValue(this.plugin.settings.defaultBookId)
-				.onChange(async (value) => {
-					this.plugin.settings.defaultBookId = value;
-					await this.plugin.saveSettings();
-				})
-				.inputEl.addEventListener('blur', () => {
-					new Notice('设置已更新');
-				}));
+	private async uploadSingleImage(
+		markdownFile: TFile,
+		editor: Editor,
+		lineNumber: number,
+		reference: ImageReference,
+	): Promise<void> {
+		this.requireCookie();
+		const imageFile = this.resolveImageFile(reference.path, markdownFile);
+		const imageUrl = await this.uploadImageFile(imageFile);
 
-		new Setting(containerEl)
-			.setName('Yuque Cookie')
-			.setDesc('语雀 Cookie（上传图片需要），从浏览器开发者工具中获取')
-			.addTextArea(text => text
-				.setPlaceholder('cookie=...')
-				.setValue(this.plugin.settings.yuqueCookie)
-				.onChange(async (value) => {
-					this.plugin.settings.yuqueCookie = value;
-					await this.plugin.saveSettings();
-				})
-				.inputEl.addEventListener('blur', () => {
-					new Notice('设置已更新');
-				}));
+		const latestLine = editor.getLine(lineNumber);
+		if (latestLine.slice(reference.fullStart, reference.fullEnd) !== reference.source) {
+			throw new Error('上传期间图片引用已发生变化，请重新执行图片上传');
+		}
+
+		if (reference.kind === 'wiki') {
+			editor.replaceRange(
+				`![](${imageUrl})`,
+				{ line: lineNumber, ch: reference.fullStart },
+				{ line: lineNumber, ch: reference.fullEnd },
+			);
+		} else {
+			editor.replaceRange(
+				imageUrl,
+				{ line: lineNumber, ch: reference.pathStart },
+				{ line: lineNumber, ch: reference.pathEnd },
+			);
+		}
+		new Notice('图片已上传到语雀');
+		this.setStatus('图片上传完成', 3000);
+	}
+
+	private async uploadAllImagesInFile(file: TFile): Promise<void> {
+		this.requireCookie();
+		const confirmed = await ConfirmModal.show(
+			this.app,
+			'上传全部本地图片？',
+			'上传完成后会将文档中的本地图片引用替换为语雀地址。',
+		);
+		if (!confirmed) {
+			return;
+		}
+
+		const originalContent = await this.app.vault.read(file);
+		const references = findImageReferences(originalContent);
+		const imagePaths = [...new Set(references.map((reference) => reference.path))];
+		if (imagePaths.length === 0) {
+			new Notice('当前文档中没有可上传的本地图片');
+			return;
+		}
+
+		const replacements = new Map<string, string>();
+		let failed = 0;
+		for (const [index, imagePath] of imagePaths.entries()) {
+			this.setStatus(`正在上传图片 ${index + 1}/${imagePaths.length}：${imagePath}`);
+			try {
+				const imageFile = this.resolveImageFile(imagePath, file);
+				const imageUrl = await this.uploadImageFile(imageFile);
+				replacements.set(imagePath, imageUrl);
+			} catch (error) {
+				failed += 1;
+				console.error(`[Yuque Sync] 图片上传失败：${imagePath}`, error);
+			}
+		}
+
+		if (replacements.size === 0) {
+			throw new Error('所有图片均上传失败');
+		}
+		const latestContent = await this.app.vault.read(file);
+		if (latestContent !== originalContent) {
+			throw new Error('上传期间文档内容已发生变化，为避免覆盖，本次未自动替换图片地址');
+		}
+
+		const nextContent = replaceImageReferences(originalContent, references, replacements);
+		await this.app.vault.modify(file, nextContent);
+		const message = `图片上传完成：成功 ${replacements.size} 张${failed ? `，失败 ${failed} 张` : ''}`;
+		new Notice(message);
+		this.setStatus(message, 5000);
+	}
+
+	private resolveImageFile(imagePath: string, markdownFile: TFile): TFile {
+		const decodedPath = safeDecodeURIComponent(imagePath);
+		const resolved = this.app.metadataCache.getFirstLinkpathDest(decodedPath, markdownFile.path);
+		if (!resolved) {
+			throw new Error(`无法解析图片路径：${imagePath}`);
+		}
+		if (!SUPPORTED_IMAGE_EXTENSIONS.has(resolved.extension.toLowerCase())) {
+			throw new Error(`不支持的图片格式：${resolved.extension}`);
+		}
+		return resolved;
+	}
+
+	private async uploadImageFile(file: TFile): Promise<string> {
+		const data = await this.app.vault.readBinary(file);
+		return this.client.uploadImage(file.name, data);
+	}
+
+	private getActiveMarkdownFile(): TFile | null {
+		const file = this.app.workspace.getActiveFile();
+		if (!file) {
+			new Notice('当前没有活动文件');
+			return null;
+		}
+		if (file.extension !== 'md') {
+			new Notice('当前文件不是 Markdown 文档');
+			return null;
+		}
+		return file;
+	}
+
+	private requireToken(): void {
+		if (!this.settings.yuqueToken.trim()) {
+			throw new Error('请先在插件设置中配置 Yuque Token');
+		}
+	}
+
+	private requireCookie(): void {
+		if (!this.settings.yuqueCookie.trim()) {
+			throw new Error('请先在插件设置中配置 Yuque Cookie');
+		}
+	}
+
+	private setStatus(text: string, clearAfter = 0): void {
+		if (this.statusTimer !== null) {
+			window.clearTimeout(this.statusTimer);
+			this.statusTimer = null;
+		}
+		this.statusBarItem.setText(text);
+		this.statusBarItem.toggleClass('is-active', Boolean(text));
+		if (clearAfter > 0) {
+			this.statusTimer = window.setTimeout(() => {
+				this.statusTimer = null;
+				this.statusBarItem.setText('');
+				this.statusBarItem.removeClass('is-active');
+			}, clearAfter);
+		}
 	}
 }
