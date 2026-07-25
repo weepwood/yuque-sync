@@ -48,13 +48,21 @@ export function readFrontmatter(content: string): Record<string, unknown> {
 		return {};
 	}
 
+	let parsed: unknown;
 	try {
-		const parsed = parseYaml(match[1]);
-		return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {};
+		parsed = parseYaml(match[1]);
 	} catch (error) {
 		const detail = error instanceof Error && error.message ? `：${error.message}` : '';
 		throw new Error(`YAML 前置元数据解析失败${detail}`);
 	}
+
+	if (parsed === null || parsed === undefined) {
+		return {};
+	}
+	if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+		throw new Error('YAML 前置元数据必须是键值对象');
+	}
+	return parsed as Record<string, unknown>;
 }
 
 export function getStringProperty(source: Record<string, unknown>, key: string): string | null {
