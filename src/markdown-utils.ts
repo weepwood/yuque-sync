@@ -72,6 +72,9 @@ export function splitMarkdown(content: string): { frontmatterBlock: string; body
 export function readFrontmatter(content: string): Record<string, unknown> {
 	const sections = getFrontmatterSections(content);
 	if (!sections) {
+		if (FRONTMATTER_OPENING_PATTERN.test(content)) {
+			throw new Error('YAML 前置元数据缺少结束分隔符');
+		}
 		return {};
 	}
 
