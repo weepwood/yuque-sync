@@ -1,11 +1,11 @@
 import {
-	Editor,
-	MarkdownFileInfo,
-	MarkdownView,
-	Menu,
+	type Editor,
+	type MarkdownFileInfo,
+	type MarkdownView,
+	type Menu,
 	Notice,
 	Plugin,
-	TAbstractFile,
+	type TAbstractFile,
 	TFile,
 	normalizePath,
 } from 'obsidian';
@@ -134,10 +134,8 @@ export default class YuqueSyncPlugin extends Plugin {
 			return;
 		}
 
-		const localContent = await this.app.vault.read(file);
-		const frontmatter = readFrontmatter(localContent);
-		const yuqueLink = getStringProperty(frontmatter, 'yuque_link');
-		const markdownBody = splitMarkdown(localContent).body;
+		const initialContent = await this.app.vault.read(file);
+		const yuqueLink = getStringProperty(readFrontmatter(initialContent), 'yuque_link');
 
 		if (yuqueLink) {
 			const location = extractYuqueLocation(yuqueLink);
@@ -152,7 +150,18 @@ export default class YuqueSyncPlugin extends Plugin {
 			if (!confirmed) {
 				return;
 			}
-			await this.client.updateDocument(location.bookId, location.slug, file.basename, markdownBody);
+
+			const latestContent = await this.app.vault.read(file);
+			const latestLink = getStringProperty(readFrontmatter(latestContent), 'yuque_link');
+			if (latestLink !== yuqueLink) {
+				throw new Error('确认期间 yuque_link 已发生变化，请重新执行上传');
+			}
+			await this.client.updateDocument(
+				location.bookId,
+				location.slug,
+				file.basename,
+				splitMarkdown(latestContent).body,
+			);
 			new Notice('文档已上传到语雀');
 			this.setStatus('文档上传完成', 3000);
 			return;
@@ -171,7 +180,15 @@ export default class YuqueSyncPlugin extends Plugin {
 			return;
 		}
 
-		const created = await this.client.createDocument(bookId, file.basename, markdownBody);
+		const latestContent = await this.app.vault.read(file);
+		if (getStringProperty(readFrontmatter(latestContent), 'yuque_link')) {
+			throw new Error('确认期间当前文件已关联语雀文档，请重新执行上传');
+		}
+		const created = await this.client.createDocument(
+			bookId,
+			file.basename,
+			splitMarkdown(latestContent).body,
+		);
 		const addedToToc = await this.client.addDocumentToToc(bookId, created.id);
 		const newYuqueLink = `https://www.yuque.com/${bookId}/${created.slug}`;
 		await this.app.fileManager.processFrontMatter(file, (metadata) => {
@@ -226,8 +243,17 @@ export default class YuqueSyncPlugin extends Plugin {
 			return;
 		}
 
-		const backupPath = await this.createBackup(file, localContent);
-		const { frontmatterBlock } = splitMarkdown(localContent);
+		const confirmedLocalContent = await this.app.vault.read(file);
+		if (confirmedLocalContent !== localContent) {
+			throw new Error('下载确认期间本地文档已发生变化，请重新执行下载');
+		}
+		const backupPath = await this.createBackup(file, confirmedLocalContent);
+		const contentBeforeReplace = await this.app.vault.read(file);
+		if (contentBeforeReplace !== confirmedLocalContent) {
+			throw new Error(`创建备份后本地文档又发生变化，已保留备份 ${backupPath}，未覆盖当前文件`);
+		}
+
+		const { frontmatterBlock } = splitMarkdown(confirmedLocalContent);
 		const remoteBody = splitMarkdown(document.content).body;
 		const nextContent = frontmatterBlock
 			? `${frontmatterBlock}\n${remoteBody}`
@@ -316,8 +342,8 @@ export default class YuqueSyncPlugin extends Plugin {
 		const imageUrl = await this.uploadImageFile(imageFile);
 
 		const latestLine = editor.getLine(lineNumber);
-		if (latestLine.slice(reference.pathStart, reference.pathEnd) !== reference.path) {
-			throw new Error('上传期间当前行已发生变化，请重新执行图片上传');
+		if (latestLine.slice(reference.fullStart, reference.fullEnd) !== reference.source) {
+			throw new Error('上传期间图片引用已发生变化，请重新执行图片上传');
 		}
 
 		if (reference.kind === 'wiki') {
