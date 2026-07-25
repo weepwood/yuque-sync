@@ -25,21 +25,17 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
 
       - name: Install dependencies
-        run: npm ci 2>&1 | tee npm-install.log
+        id: install
+        continue-on-error: true
+        run: npm install > npm-install.log 2>&1
 
       - name: Typecheck and build
-        run: npm run build 2>&1 | tee build.log
-
-      - name: Verify build output
-        run: test -s main.js
-
-      - name: Verify release versions
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          node -e "const p=require('./package.json');const m=require('./manifest.json');const tag=process.env.GITHUB_REF_NAME.replace(/^v/,'');if(p.version!==m.version||p.version!==tag){throw new Error('package.json、manifest.json 与标签版本不一致')}"
+        id: build
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
+        run: npm run build > build.log 2>&1
 
       - name: Upload diagnostics
         if: always()
@@ -49,7 +45,22 @@ jobs:
           path: |
             npm-install.log
             build.log
-          if-no-files-found: ignore
+          if-no-files-found: warn
+
+      - name: Print failure details
+        if: steps.install.outcome == 'failure' || steps.build.outcome == 'failure'
+        run: |
+          test -f npm-install.log && cat npm-install.log || true
+          test -f build.log && cat build.log || true
+          exit 1
+
+      - name: Verify build output
+        run: test -s main.js
+
+      - name: Verify release versions
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          node -e "const p=require('./package.json');const m=require('./manifest.json');const tag=process.env.GITHUB_REF_NAME.replace(/^v/,'');if(p.version!==m.version||p.version!==tag){throw new Error('package.json、manifest.json 与标签版本不一致')}"
 
       - name: Upload plugin artifact
         uses: actions/upload-artifact@v4
