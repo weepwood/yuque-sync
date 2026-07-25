@@ -69,7 +69,7 @@ export function findImageReferences(content: string): ImageReference[] {
 
 	while ((match = markdownPattern.exec(content)) !== null) {
 		const rawTarget = match[1];
-		const leadingWhitespace = rawTarget.length - rawTarget.trimStart().length;
+		const leadingWhitespace = rawTarget.search(/\S|$/);
 		const target = rawTarget.trim();
 		let path = target;
 		let offsetInTarget = leadingWhitespace;
@@ -83,7 +83,7 @@ export function findImageReferences(content: string): ImageReference[] {
 		} else {
 			const titleMatch = target.match(/\s+(?:"[^"]*"|'[^']*')\s*$/);
 			if (titleMatch?.index !== undefined) {
-				path = target.slice(0, titleMatch.index).trimEnd();
+				path = target.slice(0, titleMatch.index).replace(/\s+$/, '');
 			}
 		}
 
@@ -104,12 +104,13 @@ export function findImageReferences(content: string): ImageReference[] {
 
 	const wikiPattern = /!\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]/g;
 	while ((match = wikiPattern.exec(content)) !== null) {
-		const path = match[1].trim();
+		const rawPath = match[1];
+		const path = rawPath.trim();
 		if (!path || REMOTE_RESOURCE_PATTERN.test(path)) {
 			continue;
 		}
 
-		const pathStart = match.index + match[0].indexOf(match[1]) + (match[1].length - match[1].trimStart().length);
+		const pathStart = match.index + match[0].indexOf(rawPath) + rawPath.search(/\S|$/);
 		references.push({
 			kind: 'wiki',
 			path,
