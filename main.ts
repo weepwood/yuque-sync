@@ -1,5 +1,6 @@
 import {
 	Editor,
+	MarkdownFileInfo,
 	MarkdownView,
 	Menu,
 	Notice,
@@ -265,8 +266,8 @@ export default class YuqueSyncPlugin extends Plugin {
 	private registerEditorImageMenu(): void {
 		this.registerEvent(this.app.workspace.on(
 			'editor-menu',
-			(menu: Menu, editor: Editor, view: MarkdownView) => {
-				const file = view.file;
+			(menu: Menu, editor: Editor, info: MarkdownView | MarkdownFileInfo) => {
+				const file = info.file;
 				if (!file) {
 					return;
 				}
@@ -318,11 +319,20 @@ export default class YuqueSyncPlugin extends Plugin {
 		if (latestLine.slice(reference.pathStart, reference.pathEnd) !== reference.path) {
 			throw new Error('上传期间当前行已发生变化，请重新执行图片上传');
 		}
-		editor.replaceRange(
-			imageUrl,
-			{ line: lineNumber, ch: reference.pathStart },
-			{ line: lineNumber, ch: reference.pathEnd },
-		);
+
+		if (reference.kind === 'wiki') {
+			editor.replaceRange(
+				`![](${imageUrl})`,
+				{ line: lineNumber, ch: reference.fullStart },
+				{ line: lineNumber, ch: reference.fullEnd },
+			);
+		} else {
+			editor.replaceRange(
+				imageUrl,
+				{ line: lineNumber, ch: reference.pathStart },
+				{ line: lineNumber, ch: reference.pathEnd },
+			);
+		}
 		new Notice('图片已上传到语雀');
 		this.setStatus('图片上传完成', 3000);
 	}
