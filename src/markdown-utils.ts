@@ -52,8 +52,8 @@ export function readFrontmatter(content: string): Record<string, unknown> {
 		const parsed = parseYaml(match[1]);
 		return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {};
 	} catch (error) {
-		console.error('[Yuque Sync] 无法解析 YAML 前置元数据', error);
-		return {};
+		const detail = error instanceof Error && error.message ? `：${error.message}` : '';
+		throw new Error(`YAML 前置元数据解析失败${detail}`);
 	}
 }
 
