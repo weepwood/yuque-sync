@@ -1,16 +1,26 @@
 {
 	"name": "yuque-sync",
 	"version": "1.1.0",
-	"description": "语雀同步插件",
+	"description": "在 Obsidian 与语雀之间同步 Markdown 文档",
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
-		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+		"typecheck": "tsc --noEmit --skipLibCheck",
+		"build": "npm run typecheck && node esbuild.config.mjs production",
+		"check": "npm run build",
 		"version": "node version-bump.mjs && git add manifest.json versions.json"
 	},
-	"keywords": [],
-	"author": "",
+	"keywords": [
+		"obsidian",
+		"yuque",
+		"sync",
+		"markdown"
+	],
+	"author": "weepwood",
 	"license": "MIT",
+	"engines": {
+		"node": ">=18"
+	},
 	"devDependencies": {
 		"@types/js-yaml": "^4.0.9",
 		"@types/node": "^16.11.6",
