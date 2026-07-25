@@ -11,7 +11,7 @@ export function extractYuqueLocation(value: string): YuqueLocation | null {
 			return null;
 		}
 
-		const segments = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+		const segments = url.pathname.split('/').filter(Boolean).map((segment) => decodeURIComponent(segment));
 		if (segments.length < 3) {
 			return null;
 		}
@@ -93,6 +93,7 @@ export function findImageReferences(content: string): ImageReference[] {
 
 		const targetStart = match.index + match[0].indexOf(rawTarget);
 		references.push({
+			kind: 'markdown',
 			path,
 			pathStart: targetStart + offsetInTarget,
 			pathEnd: targetStart + offsetInTarget + path.length,
@@ -110,6 +111,7 @@ export function findImageReferences(content: string): ImageReference[] {
 
 		const pathStart = match.index + match[0].indexOf(match[1]) + (match[1].length - match[1].trimStart().length);
 		references.push({
+			kind: 'wiki',
 			path,
 			pathStart,
 			pathEnd: pathStart + path.length,
@@ -127,12 +129,20 @@ export function replaceImageReferences(
 	replacements: ReadonlyMap<string, string>,
 ): string {
 	let result = content;
-	for (const reference of [...references].sort((left, right) => right.pathStart - left.pathStart)) {
+	const replacementStart = (reference: ImageReference) =>
+		reference.kind === 'wiki' ? reference.fullStart : reference.pathStart;
+
+	for (const reference of [...references].sort((left, right) => replacementStart(right) - replacementStart(left))) {
 		const replacement = replacements.get(reference.path);
 		if (!replacement) {
 			continue;
 		}
-		result = `${result.slice(0, reference.pathStart)}${replacement}${result.slice(reference.pathEnd)}`;
+
+		if (reference.kind === 'wiki') {
+			result = `${result.slice(0, reference.fullStart)}![](${replacement})${result.slice(reference.fullEnd)}`;
+		} else {
+			result = `${result.slice(0, reference.pathStart)}${replacement}${result.slice(reference.pathEnd)}`;
+		}
 	}
 	return result;
 }
