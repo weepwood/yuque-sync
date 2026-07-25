@@ -94,6 +94,7 @@ export function findImageReferences(content: string): ImageReference[] {
 		const targetStart = match.index + match[0].indexOf(rawTarget);
 		references.push({
 			kind: 'markdown',
+			source: match[0],
 			path,
 			pathStart: targetStart + offsetInTarget,
 			pathEnd: targetStart + offsetInTarget + path.length,
@@ -113,6 +114,7 @@ export function findImageReferences(content: string): ImageReference[] {
 		const pathStart = match.index + match[0].indexOf(rawPath) + rawPath.search(/\S|$/);
 		references.push({
 			kind: 'wiki',
+			source: match[0],
 			path,
 			pathStart,
 			pathEnd: pathStart + path.length,
