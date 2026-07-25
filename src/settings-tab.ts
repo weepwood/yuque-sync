@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting } from 'obsidian';
 import type { YuqueSyncSettings } from './types';
 
 export interface SettingsHost {
@@ -9,8 +9,8 @@ export interface SettingsHost {
 export class YuqueSyncSettingTab extends PluginSettingTab {
 	private saveTimer: number | null = null;
 
-	constructor(app: App, private readonly host: SettingsHost) {
-		super(app, host as never);
+	constructor(app: App, private readonly host: Plugin & SettingsHost) {
+		super(app, host);
 	}
 
 	display(): void {
