@@ -28,6 +28,7 @@ export interface CreatedYuqueDocument {
 
 export interface ImageReference {
 	kind: 'markdown' | 'wiki';
+	source: string;
 	path: string;
 	pathStart: number;
 	pathEnd: number;
