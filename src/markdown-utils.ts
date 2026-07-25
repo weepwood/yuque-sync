@@ -1,8 +1,35 @@
 import { parseYaml } from 'obsidian';
 import type { ImageReference, YuqueLocation } from './types';
 
-const FRONTMATTER_PATTERN = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
+const FRONTMATTER_OPENING_PATTERN = /^---[ \t]*\r?\n/;
+const FRONTMATTER_CLOSING_PATTERN = /\r?\n---[ \t]*(?:\r?\n|$)/g;
 const REMOTE_RESOURCE_PATTERN = /^(?:https?:|data:|blob:)/i;
+
+interface FrontmatterSections {
+	block: string;
+	yaml: string;
+	body: string;
+}
+
+function getFrontmatterSections(content: string): FrontmatterSections | null {
+	const opening = content.match(FRONTMATTER_OPENING_PATTERN);
+	if (!opening) {
+		return null;
+	}
+
+	FRONTMATTER_CLOSING_PATTERN.lastIndex = 0;
+	const closing = FRONTMATTER_CLOSING_PATTERN.exec(content);
+	if (!closing) {
+		return null;
+	}
+
+	const blockEnd = closing.index + closing[0].length;
+	return {
+		block: content.slice(0, blockEnd).replace(/\r?\n$/, ''),
+		yaml: content.slice(opening[0].length, closing.index),
+		body: content.slice(blockEnd),
+	};
+}
 
 export function extractYuqueLocation(value: string): YuqueLocation | null {
 	try {
@@ -31,26 +58,26 @@ export function normalizeBookId(value: string): string | null {
 }
 
 export function splitMarkdown(content: string): { frontmatterBlock: string; body: string } {
-	const match = content.match(FRONTMATTER_PATTERN);
-	if (!match) {
+	const sections = getFrontmatterSections(content);
+	if (!sections) {
 		return { frontmatterBlock: '', body: content };
 	}
 
 	return {
-		frontmatterBlock: match[0].replace(/\r?\n$/, ''),
-		body: content.slice(match[0].length),
+		frontmatterBlock: sections.block,
+		body: sections.body,
 	};
 }
 
 export function readFrontmatter(content: string): Record<string, unknown> {
-	const match = content.match(FRONTMATTER_PATTERN);
-	if (!match) {
+	const sections = getFrontmatterSections(content);
+	if (!sections) {
 		return {};
 	}
 
 	let parsed: unknown;
 	try {
-		parsed = parseYaml(match[1]);
+		parsed = parseYaml(sections.yaml);
 	} catch (error) {
 		const detail = error instanceof Error && error.message ? `：${error.message}` : '';
 		throw new Error(`YAML 前置元数据解析失败${detail}`);
