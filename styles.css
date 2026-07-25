@@ -1,20 +1,30 @@
-/*
-
-This CSS file will be included with your plugin, and
-available in the app when your plugin is enabled.
-
-If your plugin does not need CSS, delete this file.
-
-*/
-/* styles.css */
 .yuque-sync-button-container {
-    /* display: flex;
-    justify-content: space-between;
-    margin-top: 10px; */
-    /* 调整顶部间距 */
+	display: flex;
+	justify-content: flex-end;
+	gap: var(--size-4-2);
+	margin-top: var(--size-4-4);
 }
 
-.yuque-sync-button-container .mod-cta {
-    /* margin-right: 10px; */
-    /* 调整按钮之间的间距 */
+.yuque-sync-confirm-message {
+	white-space: pre-line;
+	color: var(--text-muted);
+	line-height: var(--line-height-normal);
+}
+
+.yuque-sync-status {
+	display: none;
+	max-width: min(50vw, 520px);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.yuque-sync-status.is-active {
+	display: inline-flex;
+}
+
+.yuque-sync-secret-input {
+	min-height: 6em;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
 }
