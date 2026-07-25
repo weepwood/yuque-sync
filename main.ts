@@ -191,6 +191,22 @@ export default class YuqueSyncPlugin extends Plugin {
 		);
 		const addedToToc = await this.client.addDocumentToToc(bookId, created.id);
 		const newYuqueLink = `https://www.yuque.com/${bookId}/${created.slug}`;
+
+		let linkBeforeWrite: string | null;
+		try {
+			const contentBeforeLinkWrite = await this.app.vault.read(file);
+			linkBeforeWrite = getStringProperty(readFrontmatter(contentBeforeLinkWrite), 'yuque_link');
+		} catch (error) {
+			throw new Error(
+				`语雀文档已创建，但无法验证本地元数据，因此未写回链接。新文档：${newYuqueLink}。原因：${describeError(error)}`,
+			);
+		}
+		if (linkBeforeWrite) {
+			throw new Error(
+				`语雀文档已创建，但本地 yuque_link 在同步期间发生变化，因此未覆盖。新文档：${newYuqueLink}`,
+			);
+		}
+
 		await this.app.fileManager.processFrontMatter(file, (metadata) => {
 			metadata.yuque_link = newYuqueLink;
 			metadata.yuque_title = file.basename;
