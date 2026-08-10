@@ -16,19 +16,47 @@ import {
 	findImageReferences,
 	formatFileTimestamp,
 	getStringProperty,
+	isYuqueSyncDisabled,
 	normalizeBookId,
+	normalizeMarkdownForComparison,
 	readFrontmatter,
 	replaceImageReferences,
 	safeDecodeURIComponent,
 	splitMarkdown,
 } from './src/markdown-utils';
 import { YuqueSyncSettingTab } from './src/settings-tab';
-import { DEFAULT_SETTINGS, type ImageReference, type YuqueSyncSettings } from './src/types';
+import { SyncStatusModal } from './src/sync-status-modal';
+import {
+	DEFAULT_SETTINGS,
+	type ImageReference,
+	type SyncScanResult,
+	type YuqueSyncSettings,
+} from './src/types';
 import { YuqueClient } from './src/yuque-client';
 
 const SUPPORTED_IMAGE_EXTENSIONS = new Set([
 	'png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'ico', 'tiff', 'tif',
 ]);
+const BACKUP_ROOT = '.yuque-sync/backups';
+const LEGACY_BACKUP_PATTERN = /(?:^|\/)[^/]+\.backup-\d{8}-\d{6}(?:-\d+)?\.md$/;
+
+interface CreateDocumentResult {
+	yuqueLink: string;
+	addedToToc: boolean;
+	recovered: boolean;
+}
+
+function getHttpStatus(error: unknown): number | null {
+	if (typeof error !== 'object' || error === null) {
+		return null;
+	}
+	const directStatus = (error as { status?: unknown }).status;
+	if (typeof directStatus === 'number') {
+		return directStatus;
+	}
+	const responseStatus = (error as { response?: { status?: unknown } }).response?.status;
+	return typeof responseStatus === 'number' ? responseStatus : null;
+}
 
 export default class YuqueSyncPlugin extends Plugin {
 	settings: YuqueSyncSettings = { ...DEFAULT_SETTINGS };
@@ -46,6 +74,7 @@ export default class YuqueSyncPlugin extends Plugin {
 		);
 		this.statusBarItem = this.addStatusBarItem();
 		this.statusBarItem.addClass('yuque-sync-status');
+		await this.cleanupResolvedPendingCreates();
 
 		this.addRibbonIcon('cloud-upload', '上传当前文档到语雀', () => {
 			void this.runExclusive('正在上传文档', () => this.uploadActiveDocument());
@@ -66,6 +95,20 @@ export default class YuqueSyncPlugin extends Plugin {
 			name: '从语雀下载当前文档',
 			callback: () => {
 				void this.runExclusive('正在下载文档', () => this.downloadActiveDocument());
+			},
+		});
+		this.addCommand({
+			id: 'scan-all-documents',
+			name: '检测所有文档同步状态',
+			callback: () => {
+				void this.runExclusive('正在检测同步状态', () => this.scanAllDocumentsAndShow());
+			},
+		});
+		this.addCommand({
+			id: 'push-unlinked-documents',
+			name: '批量推送未关联文档到语雀',
+			callback: () => {
+				void this.runExclusive('正在批量推送文档', () => this.pushUnlinkedDocuments());
 			},
 		});
 		this.addCommand({
@@ -97,6 +140,7 @@ export default class YuqueSyncPlugin extends Plugin {
 			...DEFAULT_SETTINGS,
 			...saved,
 			yuqueToken: migratedToken,
+			pendingCreates: saved?.pendingCreates ?? {},
 		};
 	}
 
@@ -135,7 +179,11 @@ export default class YuqueSyncPlugin extends Plugin {
 		}
 
 		const initialContent = await this.app.vault.read(file);
-		const yuqueLink = getStringProperty(readFrontmatter(initialContent), 'yuque_link');
+		const initialFrontmatter = readFrontmatter(initialContent);
+		if (isYuqueSyncDisabled(initialFrontmatter)) {
+			throw new Error('当前文件设置了 yuque_sync: false，已禁止语雀同步');
+		}
+		const yuqueLink = getStringProperty(initialFrontmatter, 'yuque_link');
 
 		if (yuqueLink) {
 			const location = extractYuqueLocation(yuqueLink);
@@ -167,10 +215,7 @@ export default class YuqueSyncPlugin extends Plugin {
 			return;
 		}
 
-		const bookId = normalizeBookId(this.settings.defaultBookId);
-		if (!bookId) {
-			throw new Error('请在设置中填写格式为 namespace/book 的默认知识库');
-		}
+		const bookId = this.requireDefaultBookId();
 		const confirmed = await ConfirmModal.show(
 			this.app,
 			'创建语雀文档？',
@@ -184,38 +229,325 @@ export default class YuqueSyncPlugin extends Plugin {
 		if (getStringProperty(readFrontmatter(latestContent), 'yuque_link')) {
 			throw new Error('确认期间当前文件已关联语雀文档，请重新执行上传');
 		}
+		const result = await this.createYuqueDocumentForFile(file, bookId);
+		new Notice(result.recovered
+			? '已恢复之前创建的语雀文档关联'
+			: result.addedToToc
+				? '文档已创建并加入语雀目录'
+				: '文档已创建，但未能自动加入语雀目录');
+		this.setStatus(result.recovered ? '文档关联已恢复' : '文档创建完成', 3000);
+	}
+
+	private async scanAllDocumentsAndShow(): Promise<void> {
+		this.requireToken();
+		const results = await this.scanVault();
+		new SyncStatusModal(
+			this.app,
+			results,
+			() => this.runExclusive('正在检测同步状态', () => this.scanAllDocumentsAndShow()),
+			() => this.runExclusive('正在批量推送文档', () => this.pushUnlinkedDocuments()),
+		).open();
+		this.setStatus(`检测完成：${results.length} 个文档`, 3000);
+	}
+
+	private async scanVault(): Promise<SyncScanResult[]> {
+		const files = this.app.vault.getMarkdownFiles().filter((file) => !this.isManagedBackupFile(file));
+		const results: SyncScanResult[] = [];
+
+		for (const [index, file] of files.entries()) {
+			this.setStatus(`正在检测 ${index + 1}/${files.length}：${file.path}`);
+			let content: string;
+			try {
+				content = await this.app.vault.read(file);
+			} catch (error) {
+				results.push({
+					filePath: file.path,
+					fileName: file.name,
+					status: 'error',
+					detail: `读取失败：${describeError(error)}`,
+				});
+				continue;
+			}
+
+			let frontmatter: Record<string, unknown>;
+			try {
+				frontmatter = readFrontmatter(content);
+			} catch (error) {
+				results.push({
+					filePath: file.path,
+					fileName: file.name,
+					status: 'yaml-error',
+					detail: describeError(error),
+				});
+				continue;
+			}
+
+			if (isYuqueSyncDisabled(frontmatter)) {
+				results.push({
+					filePath: file.path,
+					fileName: file.name,
+					status: 'ignored',
+					detail: 'yuque_sync: false',
+				});
+				continue;
+			}
+
+			const yuqueLink = getStringProperty(frontmatter, 'yuque_link');
+			if (!yuqueLink) {
+				results.push({
+					filePath: file.path,
+					fileName: file.name,
+					status: 'unlinked',
+				});
+				continue;
+			}
+
+			const location = extractYuqueLocation(yuqueLink);
+			if (!location) {
+				results.push({
+					filePath: file.path,
+					fileName: file.name,
+					status: 'invalid-link',
+					yuqueLink,
+					detail: 'yuque_link 不是有效的语雀文档地址',
+				});
+				continue;
+			}
+
+			try {
+				const remote = await this.client.getDocument(location.bookId, location.slug);
+				const localBody = normalizeMarkdownForComparison(splitMarkdown(content).body);
+				const remoteBody = normalizeMarkdownForComparison(splitMarkdown(remote.content).body);
+				results.push({
+					filePath: file.path,
+					fileName: file.name,
+					status: localBody === remoteBody ? 'synced' : 'different',
+					yuqueLink,
+					detail: localBody === remoteBody ? undefined : '本地正文与语雀正文不同',
+				});
+			} catch (error) {
+				results.push({
+					filePath: file.path,
+					fileName: file.name,
+					status: getHttpStatus(error) === 404 ? 'remote-missing' : 'error',
+					yuqueLink,
+					detail: describeError(error),
+				});
+			}
+		}
+		return results;
+	}
+
+	private async pushUnlinkedDocuments(): Promise<void> {
+		this.requireToken();
+		const bookId = this.requireDefaultBookId();
+		const { files, invalidCount } = await this.collectUnlinkedDocuments();
+		if (files.length === 0) {
+			new Notice(invalidCount
+				? `没有可推送的未关联文档；另有 ${invalidCount} 个文档因读取或 YAML 异常被跳过`
+				: '没有需要推送的未关联文档');
+			return;
+		}
+
+		const confirmed = await ConfirmModal.show(
+			this.app,
+			'批量创建语雀文档？',
+			`将在 ${bookId} 中创建 ${files.length} 篇未关联文档。任务会串行执行，并为成功创建的文档写回 yuque_link。${invalidCount ? `\n另有 ${invalidCount} 篇文档因读取或 YAML 异常不会处理。` : ''}`,
+		);
+		if (!confirmed) {
+			return;
+		}
+
+		let success = 0;
+		let recovered = 0;
+		let failed = 0;
+		let skipped = 0;
+		let tocFailed = 0;
+		for (const [index, file] of files.entries()) {
+			this.setStatus(`正在推送 ${index + 1}/${files.length}：${file.path}`);
+			try {
+				if (!(await this.isUnlinkedSyncableFile(file))) {
+					skipped += 1;
+					continue;
+				}
+				const result = await this.createYuqueDocumentForFile(file, bookId);
+				success += 1;
+				if (result.recovered) {
+					recovered += 1;
+				}
+				if (!result.addedToToc) {
+					tocFailed += 1;
+				}
+			} catch (error) {
+				failed += 1;
+				console.error(`[Yuque Sync] 批量创建失败：${file.path}`, error);
+			}
+		}
+
+		const parts = [`批量推送完成：成功 ${success}`];
+		if (recovered) {
+			parts.push(`恢复关联 ${recovered}`);
+		}
+		if (skipped) {
+			parts.push(`跳过 ${skipped}`);
+		}
+		if (failed) {
+			parts.push(`失败 ${failed}`);
+		}
+		if (tocFailed) {
+			parts.push(`目录加入失败 ${tocFailed}`);
+		}
+		const message = parts.join('，');
+		new Notice(message);
+		this.setStatus(message, 5000);
+	}
+
+	private async collectUnlinkedDocuments(): Promise<{ files: TFile[]; invalidCount: number }> {
+		const files: TFile[] = [];
+		let invalidCount = 0;
+		for (const file of this.app.vault.getMarkdownFiles()) {
+			if (this.isManagedBackupFile(file)) {
+				continue;
+			}
+			try {
+				const content = await this.app.vault.read(file);
+				const frontmatter = readFrontmatter(content);
+				if (isYuqueSyncDisabled(frontmatter)) {
+					continue;
+				}
+				if (!getStringProperty(frontmatter, 'yuque_link')) {
+					files.push(file);
+				}
+			} catch (error) {
+				invalidCount += 1;
+				console.error(`[Yuque Sync] 扫描未关联文档失败：${file.path}`, error);
+			}
+		}
+		return { files, invalidCount };
+	}
+
+	private async isUnlinkedSyncableFile(file: TFile): Promise<boolean> {
+		if (this.isManagedBackupFile(file)) {
+			return false;
+		}
+		const content = await this.app.vault.read(file);
+		const frontmatter = readFrontmatter(content);
+		return !isYuqueSyncDisabled(frontmatter) && !getStringProperty(frontmatter, 'yuque_link');
+	}
+
+	private async createYuqueDocumentForFile(file: TFile, bookId: string): Promise<CreateDocumentResult> {
+		const content = await this.app.vault.read(file);
+		const frontmatter = readFrontmatter(content);
+		if (isYuqueSyncDisabled(frontmatter)) {
+			throw new Error(`${file.path} 设置了 yuque_sync: false`);
+		}
+		if (getStringProperty(frontmatter, 'yuque_link')) {
+			throw new Error(`${file.path} 已关联语雀文档`);
+		}
+
+		const recovered = await this.recoverPendingCreate(file);
+		if (recovered) {
+			return recovered;
+		}
+
 		const created = await this.client.createDocument(
 			bookId,
 			file.basename,
-			splitMarkdown(latestContent).body,
+			splitMarkdown(content).body,
 		);
-		const addedToToc = await this.client.addDocumentToToc(bookId, created.id);
-		const newYuqueLink = `https://www.yuque.com/${bookId}/${created.slug}`;
+		const yuqueLink = `https://www.yuque.com/${bookId}/${created.slug}`;
+		this.settings.pendingCreates[file.path] = {
+			yuqueLink,
+			documentId: created.id,
+			createdAt: Date.now(),
+		};
+		await this.saveSettings();
 
-		let linkBeforeWrite: string | null;
+		let latestContent: string;
 		try {
-			const contentBeforeLinkWrite = await this.app.vault.read(file);
-			linkBeforeWrite = getStringProperty(readFrontmatter(contentBeforeLinkWrite), 'yuque_link');
+			latestContent = await this.app.vault.read(file);
 		} catch (error) {
 			throw new Error(
-				`语雀文档已创建，但无法验证本地元数据，因此未写回链接。新文档：${newYuqueLink}。原因：${describeError(error)}`,
+				`语雀文档已创建，但无法验证本地文档，因此暂未写回链接。下次会尝试恢复关联：${yuqueLink}。原因：${describeError(error)}`,
 			);
 		}
-		if (linkBeforeWrite) {
-			throw new Error(
-				`语雀文档已创建，但本地 yuque_link 在同步期间发生变化，因此未覆盖。新文档：${newYuqueLink}`,
-			);
+		const latestFrontmatter = readFrontmatter(latestContent);
+		if (getStringProperty(latestFrontmatter, 'yuque_link')) {
+			throw new Error(`语雀文档已创建，但本地 yuque_link 在同步期间发生变化，因此未覆盖。新文档：${yuqueLink}`);
+		}
+		if (isYuqueSyncDisabled(latestFrontmatter)) {
+			throw new Error(`语雀文档已创建，但本地文档在同步期间设置了 yuque_sync: false，因此未写回链接。新文档：${yuqueLink}`);
 		}
 
 		await this.app.fileManager.processFrontMatter(file, (metadata) => {
-			metadata.yuque_link = newYuqueLink;
+			metadata.yuque_link = yuqueLink;
 			metadata.yuque_title = file.basename;
 		});
+		const addedToToc = await this.client.addDocumentToToc(bookId, created.id);
+		delete this.settings.pendingCreates[file.path];
+		await this.saveSettings();
+		return { yuqueLink, addedToToc, recovered: false };
+	}
 
-		new Notice(addedToToc
-			? '文档已创建并加入语雀目录'
-			: '文档已创建，但未能自动加入语雀目录');
-		this.setStatus('文档创建完成', 3000);
+	private async recoverPendingCreate(file: TFile): Promise<CreateDocumentResult | null> {
+		const pending = this.settings.pendingCreates[file.path];
+		if (!pending) {
+			return null;
+		}
+		const location = extractYuqueLocation(pending.yuqueLink);
+		if (!location) {
+			delete this.settings.pendingCreates[file.path];
+			await this.saveSettings();
+			return null;
+		}
+
+		let remote;
+		try {
+			remote = await this.client.getDocument(location.bookId, location.slug);
+		} catch (error) {
+			if (getHttpStatus(error) === 404) {
+				delete this.settings.pendingCreates[file.path];
+				await this.saveSettings();
+				return null;
+			}
+			throw error;
+		}
+
+		await this.app.fileManager.processFrontMatter(file, (metadata) => {
+			metadata.yuque_link = pending.yuqueLink;
+			metadata.yuque_title = remote.title || file.basename;
+			if (remote.updatedAt) {
+				metadata.yuque_updated_at = remote.updatedAt;
+			}
+		});
+		const addedToToc = await this.client.addDocumentToToc(location.bookId, pending.documentId);
+		delete this.settings.pendingCreates[file.path];
+		await this.saveSettings();
+		return { yuqueLink: pending.yuqueLink, addedToToc, recovered: true };
+	}
+
+	private async cleanupResolvedPendingCreates(): Promise<void> {
+		let changed = false;
+		for (const [filePath] of Object.entries(this.settings.pendingCreates)) {
+			const abstractFile = this.app.vault.getAbstractFileByPath(filePath);
+			if (!(abstractFile instanceof TFile)) {
+				delete this.settings.pendingCreates[filePath];
+				changed = true;
+				continue;
+			}
+			try {
+				const content = await this.app.vault.read(abstractFile);
+				if (getStringProperty(readFrontmatter(content), 'yuque_link')) {
+					delete this.settings.pendingCreates[filePath];
+					changed = true;
+				}
+			} catch {
+				// 保留 pending 状态，后续用户修复本地文件后仍可恢复。
+			}
+		}
+		if (changed) {
+			await this.saveSettings();
+		}
 	}
 
 	private async downloadActiveDocument(): Promise<void> {
@@ -253,7 +585,7 @@ export default class YuqueSyncPlugin extends Plugin {
 		const confirmed = await ConfirmModal.show(
 			this.app,
 			'从语雀下载并覆盖本地文件？',
-			`${relation}\n本地：${localLabel}\n语雀：${remoteLabel}\n覆盖前会创建备份。`,
+			`${relation}\n本地：${localLabel}\n语雀：${remoteLabel}\n覆盖前会备份到 ${BACKUP_ROOT}。`,
 		);
 		if (!confirmed) {
 			return;
@@ -288,21 +620,42 @@ export default class YuqueSyncPlugin extends Plugin {
 	}
 
 	private async createBackup(file: TFile, content: string): Promise<string> {
-		const directory = file.parent?.path ?? '';
+		const sourceDirectory = file.parent?.path ?? '';
+		const backupDirectory = normalizePath(
+			[BACKUP_ROOT, sourceDirectory].filter(Boolean).join('/'),
+		);
+		await this.ensureFolder(backupDirectory);
+
 		const timestamp = formatFileTimestamp(new Date());
 		let suffix = 0;
 		let backupPath = '';
-
 		do {
 			const postfix = suffix === 0 ? '' : `-${suffix}`;
 			backupPath = normalizePath(
-				[directory, `${file.basename}.backup-${timestamp}${postfix}.md`].filter(Boolean).join('/'),
+				`${backupDirectory}/${file.basename}.backup-${timestamp}${postfix}.md`,
 			);
 			suffix += 1;
 		} while (this.app.vault.getAbstractFileByPath(backupPath));
 
 		await this.app.vault.create(backupPath, content);
 		return backupPath;
+	}
+
+	private async ensureFolder(path: string): Promise<void> {
+		let current = '';
+		for (const segment of normalizePath(path).split('/').filter(Boolean)) {
+			current = normalizePath([current, segment].filter(Boolean).join('/'));
+			if (!this.app.vault.getAbstractFileByPath(current)) {
+				await this.app.vault.createFolder(current);
+			}
+		}
+	}
+
+	private isManagedBackupFile(file: TFile): boolean {
+		const path = normalizePath(file.path);
+		return path === BACKUP_ROOT
+			|| path.startsWith(`${BACKUP_ROOT}/`)
+			|| LEGACY_BACKUP_PATTERN.test(path);
 	}
 
 	private registerEditorImageMenu(): void {
@@ -461,6 +814,14 @@ export default class YuqueSyncPlugin extends Plugin {
 		if (!this.settings.yuqueToken.trim()) {
 			throw new Error('请先在插件设置中配置 Yuque Token');
 		}
+	}
+
+	private requireDefaultBookId(): string {
+		const bookId = normalizeBookId(this.settings.defaultBookId);
+		if (!bookId) {
+			throw new Error('请在设置中填写格式为 namespace/book 的默认知识库');
+		}
+		return bookId;
 	}
 
 	private requireCookie(): void {
