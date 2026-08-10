@@ -397,7 +397,7 @@ export class SyncEngine {
 				continue;
 			}
 			if (this.dirtyPaths.has(file.path) || entry.mtime !== file.stat.mtime || entry.size !== file.stat.size) {
-				planned.set(file.path, Boolean(entry.yuqueLink && entry.lastSyncedHash));
+				planned.set(file.path, Boolean(entry.yuqueLink));
 			}
 		}
 
