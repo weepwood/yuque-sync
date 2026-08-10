@@ -1,0 +1,36 @@
+name: Validate UI optimization temporary
+
+on:
+  push:
+    branches: [feat/incremental-sync-index]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-ui-optimization-temporary
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Lint typecheck and build
+        run: npm run check
+      - name: Verify generated plugin files
+        run: |
+          test -s main.js
+          test -s manifest.json
+          test -s styles.css
+      - name: Check latest Obsidian API types
+        run: |
+          npm install --no-save --package-lock=false obsidian@latest
+          node -e "console.log('obsidian-api', require('obsidian/package.json').version)"
+          npm run typecheck
