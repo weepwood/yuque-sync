@@ -20,7 +20,7 @@ export class YuqueSyncSettingTab extends PluginSettingTab {
 
 		const hero = containerEl.createDiv({ cls: 'yuque-sync-settings-hero' });
 		const heroCopy = hero.createDiv();
-		heroCopy.createEl('h2', { text: 'Yuque Sync' });
+		heroCopy.createDiv({ text: 'Yuque Sync', cls: 'yuque-sync-settings-title' });
 		heroCopy.createEl('p', {
 			text: '管理语雀连接、文档创建目标和万级笔记的增量检测策略。设置会自动保存。',
 		});
