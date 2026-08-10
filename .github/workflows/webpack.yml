@@ -29,8 +29,26 @@ jobs:
           cache: npm
           package-manager-cache: true
 
-      - name: Refresh package lock
-        run: npm install --package-lock-only --ignore-scripts
+      - name: Apply source modernization fixes
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          const path = 'main.ts';
+          const original = readFileSync(path, 'utf8');
+          const updated = original.replaceAll(
+            'processFrontMatter(file, (metadata) => {',
+            'processFrontMatter(file, (metadata: Record<string, unknown>) => {',
+          );
+          if (updated === original) {
+            throw new Error('Expected processFrontMatter callbacks were not found');
+          }
+          writeFileSync(path, updated);
+          NODE
+
+      - name: Rebuild package lock from scratch
+        run: |
+          rm package-lock.json
+          npm install --package-lock-only --ignore-scripts
 
       - name: Install modernized dependencies
         run: npm ci
@@ -44,14 +62,14 @@ jobs:
           node -e "console.log('obsidian-api', require('obsidian/package.json').version)"
           npm run typecheck
 
-      - name: Commit refreshed lockfile
+      - name: Commit modernization fixes
         run: |
-          if git diff --quiet -- package-lock.json; then
-            echo "package-lock.json is already current"
-            exit 0
-          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package-lock.json
-          git commit -m "构建：更新现代化依赖锁文件"
+          git add main.ts package-lock.json
+          if git diff --cached --quiet; then
+            echo "Modernization files are already current"
+            exit 0
+          fi
+          git commit -m "构建：完成依赖现代化适配"
           git push
