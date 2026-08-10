@@ -1,0 +1,147 @@
+name: Fix sync snapshot race temporary
+
+on:
+  push:
+    branches: [feat/incremental-sync-index]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fix-sync-snapshot-race-temporary
+  cancel-in-progress: true
+
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feat/incremental-sync-index
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - name: Apply race-condition fix
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('src/sync-engine.ts')
+          s = p.read_text()
+
+          s = s.replace(
+          "interface ScanFileResult {\n\tentry: SyncIndexEntry;\n\tremoteRequest: boolean;\n}\n",
+          "interface ScanFileResult {\n\tentry: SyncIndexEntry;\n\tremoteRequest: boolean;\n}\n\ninterface LocalSnapshot {\n\tcontent: string;\n\tmtime: number;\n\tsize: number;\n}\n"
+          )
+
+          s = s.replace(
+          "\t\t\t\t\tconst completedBefore = scanned;\n\t\t\t\t\tthis.setStatus(`正在${mode === 'full' ? '完整' : '增量'}检测 ${completedBefore + 1}/${plan.paths.length}：${file.path}`);\n\t\t\t\t\ttry {",
+          "\t\t\t\t\tconst completedBefore = scanned;\n\t\t\t\t\tthis.setStatus(`正在${mode === 'full' ? '完整' : '增量'}检测 ${completedBefore + 1}/${plan.paths.length}：${file.path}`);\n\t\t\t\t\tlet snapshotStable = false;\n\t\t\t\t\ttry {"
+          )
+          s = s.replace(
+          "\t\t\t\t\t\tsettings.syncIndex[path] = result.entry;\n\t\t\t\t\t\tif (result.remoteRequest) {",
+          "\t\t\t\t\t\tsettings.syncIndex[path] = result.entry;\n\t\t\t\t\t\tsnapshotStable = file.stat.mtime === result.entry.mtime && file.stat.size === result.entry.size;\n\t\t\t\t\t\tif (result.remoteRequest) {"
+          )
+          s = s.replace(
+          "\t\t\t\t\tthis.dirtyPaths.delete(path);\n\t\t\t\t\tremaining.delete(path);",
+          "\t\t\t\t\tif (snapshotStable) {\n\t\t\t\t\t\tthis.dirtyPaths.delete(path);\n\t\t\t\t\t} else {\n\t\t\t\t\t\tthis.dirtyPaths.add(path);\n\t\t\t\t\t}\n\t\t\t\t\tremaining.delete(path);"
+          )
+
+          start = s.index('\tprivate async scanFile(')
+          end = s.index('\n\tprivate pruneMissingEntries', start)
+          block = s[start:end]
+          block = block.replace(
+          "\t\tconst content = await this.app.vault.cachedRead(file);",
+          "\t\tconst snapshot = await this.readStableSnapshot(file);\n\t\tconst { content } = snapshot;"
+          )
+          block = block.replace('mtime: file.stat.mtime', 'mtime: snapshot.mtime')
+          block = block.replace('size: file.stat.size', 'size: snapshot.size')
+          s = s[:start] + block + s[end:]
+
+          rs = s.index('\tasync recordSynchronized(')
+          rr = s.index('\n\tasync recordRemoteComparison(', rs)
+          new_rs = '''\tasync recordSynchronized(
+          \t\tfile: TFile,
+          \t\tyuqueLink: string,
+          \t\tcontent?: string,
+          \t\tremoteUpdatedAt = '',
+          \t): Promise<void> {
+          \t\tconst snapshot = await this.readStableSnapshot(file);
+          \t\tconst baselineContent = content ?? snapshot.content;
+          \t\tconst baselineHash = await hashMarkdownBody(baselineContent);
+          \t\tconst localHash = await hashMarkdownBody(snapshot.content);
+          \t\tconst status: SyncStatus = localHash === baselineHash ? 'synced' : 'local-changed';
+          \t\tconst now = Date.now();
+          \t\tthis.getSettings().syncIndex[file.path] = {
+          \t\t\tpath: file.path,
+          \t\t\tmtime: snapshot.mtime,
+          \t\t\tsize: snapshot.size,
+          \t\t\tstatus,
+          \t\t\tyuqueLink,
+          \t\t\tlocalHash,
+          \t\t\tremoteHash: baselineHash,
+          \t\t\tlastSyncedHash: baselineHash,
+          \t\t\tremoteUpdatedAt: remoteUpdatedAt || undefined,
+          \t\t\tremoteCheckedAt: now,
+          \t\t\tlastCheckedAt: now,
+          \t\t\tdetail: statusDetail(status),
+          \t\t};
+          \t\tthis.reconcileDirtyPath(file, snapshot);
+          \t\tawait this.persistNow();
+          \t}
+          '''
+          s = s[:rs] + new_rs + s[rr:]
+
+          rr = s.index('\tasync recordRemoteComparison(')
+          bp = s.index('\n\tprivate async buildIncrementalPlan', rr)
+          old = s[rr:bp]
+          old = old.replace(
+          "\t\tconst localContent = await this.app.vault.cachedRead(file);\n\t\tconst localHash = await hashMarkdownBody(localContent);",
+          "\t\tconst snapshot = await this.readStableSnapshot(file);\n\t\tconst localHash = await hashMarkdownBody(snapshot.content);"
+          )
+          old = old.replace('mtime: file.stat.mtime', 'mtime: snapshot.mtime')
+          old = old.replace('size: file.stat.size', 'size: snapshot.size')
+          old = old.replace(
+          "\t\tthis.dirtyPaths.delete(file.path);\n\t\tawait this.persistNow();",
+          "\t\tthis.reconcileDirtyPath(file, snapshot);\n\t\tawait this.persistNow();"
+          )
+          s = s[:rr] + old + s[bp:]
+
+          insert = s.index('\n\tprivate pruneMissingEntries')
+          helpers = '''
+          \n\tprivate async readStableSnapshot(file: TFile): Promise<LocalSnapshot> {
+          \t\tfor (let attempt = 0; attempt < 3; attempt += 1) {
+          \t\t\tconst mtime = file.stat.mtime;
+          \t\t\tconst size = file.stat.size;
+          \t\t\tconst content = await this.app.vault.cachedRead(file);
+          \t\t\tif (file.stat.mtime === mtime && file.stat.size === size) {
+          \t\t\t\treturn { content, mtime, size };
+          \t\t\t}
+          \t\t}
+          \t\tthrow new Error(`${file.path} 在检测期间持续变化，已保留为待重新检测`);
+          \t}
+          \n\tprivate reconcileDirtyPath(file: TFile, snapshot: LocalSnapshot): void {
+          \t\tif (file.stat.mtime === snapshot.mtime && file.stat.size === snapshot.size) {
+          \t\t\tthis.dirtyPaths.delete(file.path);
+          \t\t} else {
+          \t\t\tthis.dirtyPaths.add(file.path);
+          \t\t}
+          \t}
+          '''
+          s = s[:insert] + helpers + s[insert:]
+
+          p.write_text(s)
+          PY
+      - run: npm ci
+      - run: npm run check
+      - name: Commit fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/sync-engine.ts
+          if git diff --cached --quiet; then
+            echo "No changes"
+            exit 0
+          fi
+          git commit -m "修复：避免扫描期间编辑导致同步状态丢失"
+          git push
