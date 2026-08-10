@@ -159,12 +159,21 @@ Notes/Programming/TypeScript.md
 
 ## 开发
 
+开发环境建议使用 Node.js 22 或更高版本；GitHub Actions 使用 Node.js 24。
+
 ```bash
 npm ci
 npm run dev
+npm run lint
 npm run typecheck
 npm run build
+npm run check
 ```
+
+- `npm run lint`：使用 ESLint 9 和 Obsidian 官方 `eslint-plugin-obsidianmd` 检查插件开发规范
+- `npm run typecheck`：使用 TypeScript 5.x 执行严格类型检查
+- `npm run build`：类型检查后使用 esbuild 生成生产版 `main.js`
+- `npm run check`：依次执行 lint、typecheck 和生产构建，CI 使用该命令作为主验证入口
 
 项目结构：
 
