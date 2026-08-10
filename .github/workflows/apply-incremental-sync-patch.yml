@@ -1,0 +1,161 @@
+name: Apply incremental sync patch
+
+on:
+  push:
+    branches: [feat/incremental-sync-index]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-incremental-sync-patch
+  cancel-in-progress: true
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feat/incremental-sync-index
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          package-manager-cache: true
+
+      - name: Patch main workflow
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+
+          const path = 'main.ts';
+          let source = readFileSync(path, 'utf8');
+          const replaceExact = (from, to, label) => {
+            if (!source.includes(from)) {
+              if (source.includes(to)) return;
+              throw new Error(`Missing patch target: ${label}`);
+            }
+            source = source.replace(from, to);
+          };
+
+          replaceExact(
+            `import { YuqueSyncSettingTab } from './src/settings-tab';\nimport { SyncStatusModal } from './src/sync-status-modal';\nimport {\n\tDEFAULT_SETTINGS,\n\ttype ImageReference,\n\ttype SyncScanResult,\n\ttype YuqueSyncSettings,\n} from './src/types';`,
+            `import { YuqueSyncSettingTab } from './src/settings-tab';\nimport { SyncEngine } from './src/sync-engine';\nimport { SyncStatusModal } from './src/sync-status-modal';\nimport {\n\tDEFAULT_SETTINGS,\n\ttype ImageReference,\n\ttype ScanMode,\n\ttype YuqueSyncSettings,\n} from './src/types';`,
+            'imports',
+          );
+
+          replaceExact(
+            `\tprivate operationInProgress = false;\n`,
+            `\tprivate operationInProgress = false;\n\tprivate syncEngine!: SyncEngine;\n`,
+            'sync engine field',
+          );
+
+          replaceExact(
+            `\t\tthis.client = new YuqueClient(\n\t\t\t() => this.pluginSettings.yuqueToken,\n\t\t\t() => this.pluginSettings.yuqueCookie,\n\t\t);\n\t\tthis.statusBarItem = this.addStatusBarItem();`,
+            `\t\tthis.client = new YuqueClient(\n\t\t\t() => this.pluginSettings.yuqueToken,\n\t\t\t() => this.pluginSettings.yuqueCookie,\n\t\t);\n\t\tthis.syncEngine = new SyncEngine(\n\t\t\tthis.app,\n\t\t\tthis.client,\n\t\t\t() => this.pluginSettings,\n\t\t\t() => this.saveSettings(),\n\t\t\t(file) => this.isManagedBackupFile(file),\n\t\t\t(text) => this.setStatus(text),\n\t\t);\n\t\tthis.statusBarItem = this.addStatusBarItem();`,
+            'engine initialization',
+          );
+
+          replaceExact(
+            `\t\tawait this.cleanupResolvedPendingCreates();\n\n\t\tthis.addRibbonIcon`,
+            `\t\tawait this.cleanupResolvedPendingCreates();\n\t\tthis.registerSyncTracking();\n\n\t\tthis.addRibbonIcon`,
+            'vault tracking registration',
+          );
+
+          replaceExact(
+            `\t\tthis.addCommand({\n\t\t\tid: 'scan-all-documents',\n\t\t\tname: '检测所有文档同步状态',\n\t\t\tcallback: () => {\n\t\t\t\tvoid this.runExclusive('正在检测同步状态', () => this.scanAllDocumentsAndShow());\n\t\t\t},\n\t\t});`,
+            `\t\tthis.addCommand({\n\t\t\tid: 'scan-incremental-documents',\n\t\t\tname: '增量检测文档同步状态',\n\t\t\tcallback: () => {\n\t\t\t\tvoid this.runExclusive('正在增量检测同步状态', () => this.scanDocumentsAndShow('incremental'));\n\t\t\t},\n\t\t});\n\t\tthis.addCommand({\n\t\t\tid: 'scan-all-documents',\n\t\t\tname: '完整检测所有文档同步状态',\n\t\t\tcallback: () => {\n\t\t\t\tvoid this.runExclusive('正在完整检测同步状态', () => this.scanDocumentsAndShow('full'));\n\t\t\t},\n\t\t});\n\t\tthis.addCommand({\n\t\t\tid: 'cancel-sync-scan',\n\t\t\tname: '暂停当前同步检测',\n\t\t\tcallback: () => {\n\t\t\t\tnew Notice(this.syncEngine.cancelScan()\n\t\t\t\t\t? '已请求暂停同步检测；当前请求完成后会保存进度'\n\t\t\t\t\t: '当前没有正在执行的同步检测');\n\t\t\t},\n\t\t});`,
+            'scan commands',
+          );
+
+          replaceExact(
+            `\tonunload(): void {\n\t\tif (this.statusTimer !== null) {\n\t\t\twindow.clearTimeout(this.statusTimer);\n\t\t}\n\t}`,
+            `\tonunload(): void {\n\t\tif (this.statusTimer !== null) {\n\t\t\twindow.clearTimeout(this.statusTimer);\n\t\t}\n\t\tvoid this.syncEngine?.flush();\n\t}`,
+            'unload flush',
+          );
+
+          replaceExact(
+            `\t\tthis.pluginSettings = {\n\t\t\t...DEFAULT_SETTINGS,\n\t\t\t...saved,\n\t\t\tyuqueToken: migratedToken,\n\t\t\tpendingCreates: saved?.pendingCreates ?? {},\n\t\t};`,
+            `\t\tthis.pluginSettings = {\n\t\t\t...DEFAULT_SETTINGS,\n\t\t\t...saved,\n\t\t\tyuqueToken: migratedToken,\n\t\t\tpendingCreates: saved?.pendingCreates ?? {},\n\t\t\tsyncIndex: saved?.syncIndex ?? {},\n\t\t\tdirtyFiles: saved?.dirtyFiles ?? [],\n\t\t\tscanSession: saved?.scanSession ?? null,\n\t\t\tremoteCheckTtlHours: saved?.remoteCheckTtlHours ?? DEFAULT_SETTINGS.remoteCheckTtlHours,\n\t\t\tremoteFallbackBudget: saved?.remoteFallbackBudget ?? DEFAULT_SETTINGS.remoteFallbackBudget,\n\t\t\tscanConcurrency: saved?.scanConcurrency ?? DEFAULT_SETTINGS.scanConcurrency,\n\t\t};`,
+            'settings migration',
+          );
+
+          replaceExact(
+            `\t\t\tawait this.client.updateDocument(\n\t\t\t\tlocation.bookId,\n\t\t\t\tlocation.slug,\n\t\t\t\tfile.basename,\n\t\t\t\tsplitMarkdown(latestContent).body,\n\t\t\t);\n\t\t\tnew Notice('文档已上传到语雀');`,
+            `\t\t\tconst updatedAt = await this.client.updateDocument(\n\t\t\t\tlocation.bookId,\n\t\t\t\tlocation.slug,\n\t\t\t\tfile.basename,\n\t\t\t\tsplitMarkdown(latestContent).body,\n\t\t\t);\n\t\t\tawait this.syncEngine.recordSynchronized(file, yuqueLink, latestContent, updatedAt);\n\t\t\tnew Notice('文档已上传到语雀');`,
+            'upload index update',
+          );
+
+          const scanStart = source.indexOf('\tprivate async scanAllDocumentsAndShow(): Promise<void> {');
+          const pushStart = source.indexOf('\tprivate async pushUnlinkedDocuments(): Promise<void> {', scanStart);
+          if (scanStart >= 0 && pushStart > scanStart) {
+            const scanBlock = `\tprivate async scanDocumentsAndShow(mode: ScanMode): Promise<void> {\n\t\tthis.requireToken();\n\t\tif (mode === 'full') {\n\t\t\tconst total = this.app.vault.getMarkdownFiles().filter((file) => !this.isManagedBackupFile(file)).length;\n\t\t\tconst confirmed = await ConfirmModal.show(\n\t\t\t\tthis.app,\n\t\t\t\t'执行完整同步检测？',\n\t\t\t\t\`将深度校验 \\${total} 篇 Markdown。完整检测会下载所有已关联语雀文档正文；任务支持暂停和断点继续。\`,\n\t\t\t);\n\t\t\tif (!confirmed) {\n\t\t\t\treturn;\n\t\t\t}\n\t\t}\n\n\t\tconst report = await this.syncEngine.scan(mode);\n\t\tnew SyncStatusModal(\n\t\t\tthis.app,\n\t\t\treport.results,\n\t\t\treport.summary,\n\t\t\t(nextMode) => this.runExclusive(\n\t\t\t\tnextMode === 'full' ? '正在完整检测同步状态' : '正在增量检测同步状态',\n\t\t\t\t() => this.scanDocumentsAndShow(nextMode),\n\t\t\t),\n\t\t\t() => this.runExclusive('正在批量推送文档', () => this.pushUnlinkedDocuments()),\n\t\t).open();\n\n\t\tconst message = report.summary.canceled\n\t\t\t? \`检测已暂停：本次处理 \\${report.summary.scanned} 篇，进度已保存\`\n\t\t\t: \`检测完成：实际处理 \\${report.summary.scanned} 篇，复用缓存 \\${report.summary.cached} 篇，远端正文请求 \\${report.summary.remoteBodyRequests} 次\`;\n\t\tnew Notice(message);\n\t\tthis.setStatus(message, 5000);\n\t}\n\n`;
+            source = source.slice(0, scanStart) + scanBlock + source.slice(pushStart);
+          } else if (!source.includes('private async scanDocumentsAndShow(mode: ScanMode)')) {
+            throw new Error('Missing scan method block');
+          }
+
+          replaceExact(
+            `\t\t\t\tconst content = await this.app.vault.read(file);\n\t\t\t\tconst frontmatter = readFrontmatter(content);`,
+            `\t\t\t\tconst content = await this.app.vault.cachedRead(file);\n\t\t\t\tconst frontmatter = readFrontmatter(content);`,
+            'unlinked collection cached read',
+          );
+
+          replaceExact(
+            `\t\tconst content = await this.app.vault.read(file);\n\t\tconst frontmatter = readFrontmatter(content);\n\t\treturn !isYuqueSyncDisabled(frontmatter) && !getStringProperty(frontmatter, 'yuque_link');`,
+            `\t\tconst content = await this.app.vault.cachedRead(file);\n\t\tconst frontmatter = readFrontmatter(content);\n\t\treturn !isYuqueSyncDisabled(frontmatter) && !getStringProperty(frontmatter, 'yuque_link');`,
+            'unlinked validation cached read',
+          );
+
+          replaceExact(
+            `\t\tconst addedToToc = await this.client.addDocumentToToc(bookId, created.id);\n\t\tdelete this.pluginSettings.pendingCreates[file.path];\n\t\tawait this.saveSettings();\n\t\treturn { yuqueLink, addedToToc, recovered: false };`,
+            `\t\tconst addedToToc = await this.client.addDocumentToToc(bookId, created.id);\n\t\tdelete this.pluginSettings.pendingCreates[file.path];\n\t\tawait this.saveSettings();\n\t\tawait this.syncEngine.recordSynchronized(file, yuqueLink, content, created.updatedAt);\n\t\treturn { yuqueLink, addedToToc, recovered: false };`,
+            'create index update',
+          );
+
+          replaceExact(
+            `\t\tconst addedToToc = await this.client.addDocumentToToc(location.bookId, pending.documentId);\n\t\tdelete this.pluginSettings.pendingCreates[file.path];\n\t\tawait this.saveSettings();\n\t\treturn { yuqueLink: pending.yuqueLink, addedToToc, recovered: true };`,
+            `\t\tconst addedToToc = await this.client.addDocumentToToc(location.bookId, pending.documentId);\n\t\tdelete this.pluginSettings.pendingCreates[file.path];\n\t\tawait this.saveSettings();\n\t\tawait this.syncEngine.recordRemoteComparison(file, pending.yuqueLink, remote.content, remote.updatedAt);\n\t\treturn { yuqueLink: pending.yuqueLink, addedToToc, recovered: true };`,
+            'recover index update',
+          );
+
+          replaceExact(
+            `\t\t\t\tconst content = await this.app.vault.read(abstractFile);`,
+            `\t\t\t\tconst content = await this.app.vault.cachedRead(abstractFile);`,
+            'pending cleanup cached read',
+          );
+
+          replaceExact(
+            `\t\tawait this.app.fileManager.processFrontMatter(file, (metadata: Record<string, unknown>) => {\n\t\t\tmetadata.yuque_link = yuqueLink;\n\t\t\tmetadata.yuque_title = document.title;\n\t\t\tif (document.updatedAt) {\n\t\t\t\tmetadata.yuque_updated_at = document.updatedAt;\n\t\t\t}\n\t\t});\n\n\t\tnew Notice(\`下载完成，原文件已备份到 \\${backupPath}\`);`,
+            `\t\tawait this.app.fileManager.processFrontMatter(file, (metadata: Record<string, unknown>) => {\n\t\t\tmetadata.yuque_link = yuqueLink;\n\t\t\tmetadata.yuque_title = document.title;\n\t\t\tif (document.updatedAt) {\n\t\t\t\tmetadata.yuque_updated_at = document.updatedAt;\n\t\t\t}\n\t\t});\n\t\tawait this.syncEngine.recordSynchronized(file, yuqueLink, nextContent, document.updatedAt);\n\n\t\tnew Notice(\`下载完成，原文件已备份到 \\${backupPath}\`);`,
+            'download index update',
+          );
+
+          const backupMethod = `\tprivate isManagedBackupFile(file: TFile): boolean {\n\t\tconst path = normalizePath(file.path);\n\t\treturn path === BACKUP_ROOT\n\t\t\t|| path.startsWith(\`\\${BACKUP_ROOT}/\`)\n\t\t\t|| LEGACY_BACKUP_PATTERN.test(path);\n\t}\n`;
+          if (source.includes(backupMethod) && !source.includes('private registerSyncTracking(): void')) {
+            const trackingMethod = `${backupMethod}\n\tprivate registerSyncTracking(): void {\n\t\tthis.app.workspace.onLayoutReady(() => {\n\t\t\tthis.registerEvent(this.app.vault.on('create', (file: TAbstractFile) => {\n\t\t\t\tif (file instanceof TFile && file.extension === 'md' && !this.isManagedBackupFile(file)) {\n\t\t\t\t\tthis.syncEngine.markDirty(file.path);\n\t\t\t\t}\n\t\t\t}));\n\t\t\tthis.registerEvent(this.app.vault.on('modify', (file: TAbstractFile) => {\n\t\t\t\tif (file instanceof TFile && file.extension === 'md' && !this.isManagedBackupFile(file)) {\n\t\t\t\t\tthis.syncEngine.markDirty(file.path);\n\t\t\t\t}\n\t\t\t}));\n\t\t\tthis.registerEvent(this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {\n\t\t\t\tif (file instanceof TFile && file.extension === 'md' && !this.isManagedBackupFile(file)) {\n\t\t\t\t\tthis.syncEngine.renamePath(oldPath, file.path);\n\t\t\t\t} else {\n\t\t\t\t\tthis.syncEngine.removePath(oldPath);\n\t\t\t\t}\n\t\t\t}));\n\t\t\tthis.registerEvent(this.app.vault.on('delete', (file: TAbstractFile) => {\n\t\t\t\tif (file instanceof TFile && file.extension === 'md') {\n\t\t\t\t\tthis.syncEngine.removePath(file.path);\n\t\t\t\t}\n\t\t\t}));\n\t\t});\n\t}\n`;
+            source = source.replace(backupMethod, trackingMethod);
+          }
+
+          writeFileSync(path, source);
+          NODE
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate patch
+        run: npm run check
+
+      - name: Commit patched main
+        run: |
+          if git diff --quiet -- main.ts; then
+            echo "main.ts already patched"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add main.ts
+          git commit -m "性能：接入增量同步扫描引擎"
+          git push
