@@ -100,6 +100,21 @@ export function getStringProperty(source: Record<string, unknown>, key: string):
 	return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
+export function isYuqueSyncDisabled(source: Record<string, unknown>): boolean {
+	const value = source.yuque_sync;
+	if (value === false) {
+		return true;
+	}
+	if (typeof value !== 'string') {
+		return false;
+	}
+	return ['false', 'off', 'no', '0'].includes(value.trim().toLowerCase());
+}
+
+export function normalizeMarkdownForComparison(content: string): string {
+	return content.replace(/\r\n?/g, '\n').trim();
+}
+
 export function findImageReferences(content: string): ImageReference[] {
 	const references: ImageReference[] = [];
 	const markdownPattern = /!\[[^\]]*\]\(([^)\n]+)\)/g;
