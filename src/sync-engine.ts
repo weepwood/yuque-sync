@@ -34,6 +34,12 @@ interface ScanFileResult {
 	remoteRequest: boolean;
 }
 
+interface LocalSnapshot {
+	content: string;
+	mtime: number;
+	size: number;
+}
+
 export interface SyncScanReport {
 	results: SyncScanResult[];
 	summary: ScanSummary;
@@ -267,9 +273,11 @@ export class SyncEngine {
 
 					const completedBefore = scanned;
 					this.setStatus(`正在${mode === 'full' ? '完整' : '增量'}检测 ${completedBefore + 1}/${plan.paths.length}：${file.path}`);
+					let snapshotStable = false;
 					try {
 						const result = await this.scanFile(file, mode, mode === 'full' || plan.remoteRequired.has(path));
 						settings.syncIndex[path] = result.entry;
+						snapshotStable = file.stat.mtime === result.entry.mtime && file.stat.size === result.entry.size;
 						if (result.remoteRequest) {
 							remoteBodyRequests += 1;
 						}
@@ -283,7 +291,11 @@ export class SyncEngine {
 							detail: describeError(error),
 						};
 					}
-					this.dirtyPaths.delete(path);
+					if (snapshotStable) {
+						this.dirtyPaths.delete(path);
+					} else {
+						this.dirtyPaths.add(path);
+					}
 					remaining.delete(path);
 					scanned += 1;
 
@@ -335,23 +347,27 @@ export class SyncEngine {
 		content?: string,
 		remoteUpdatedAt = '',
 	): Promise<void> {
-		const currentContent = content ?? await this.app.vault.cachedRead(file);
-		const hash = await hashMarkdownBody(currentContent);
+		const snapshot = await this.readStableSnapshot(file);
+		const baselineContent = content ?? snapshot.content;
+		const baselineHash = await hashMarkdownBody(baselineContent);
+		const localHash = await hashMarkdownBody(snapshot.content);
+		const status: SyncStatus = localHash === baselineHash ? 'synced' : 'local-changed';
 		const now = Date.now();
 		this.getSettings().syncIndex[file.path] = {
 			path: file.path,
-			mtime: file.stat.mtime,
-			size: file.stat.size,
-			status: 'synced',
+			mtime: snapshot.mtime,
+			size: snapshot.size,
+			status,
 			yuqueLink,
-			localHash: hash,
-			remoteHash: hash,
-			lastSyncedHash: hash,
+			localHash,
+			remoteHash: baselineHash,
+			lastSyncedHash: baselineHash,
 			remoteUpdatedAt: remoteUpdatedAt || undefined,
 			remoteCheckedAt: now,
 			lastCheckedAt: now,
+			detail: statusDetail(status),
 		};
-		this.dirtyPaths.delete(file.path);
+		this.reconcileDirtyPath(file, snapshot);
 		await this.persistNow();
 	}
 
@@ -361,8 +377,8 @@ export class SyncEngine {
 		remoteContent: string,
 		remoteUpdatedAt: string,
 	): Promise<void> {
-		const localContent = await this.app.vault.cachedRead(file);
-		const localHash = await hashMarkdownBody(localContent);
+		const snapshot = await this.readStableSnapshot(file);
+		const localHash = await hashMarkdownBody(snapshot.content);
 		const remoteHash = await hashMarkdownBody(remoteContent);
 		const previous = this.getSettings().syncIndex[file.path];
 		const previousForLink = previous?.yuqueLink === yuqueLink ? previous : undefined;
@@ -370,8 +386,8 @@ export class SyncEngine {
 		const now = Date.now();
 		this.getSettings().syncIndex[file.path] = {
 			path: file.path,
-			mtime: file.stat.mtime,
-			size: file.stat.size,
+			mtime: snapshot.mtime,
+			size: snapshot.size,
 			status: classification.status,
 			yuqueLink,
 			localHash,
@@ -382,7 +398,7 @@ export class SyncEngine {
 			lastCheckedAt: now,
 			detail: statusDetail(classification.status),
 		};
-		this.dirtyPaths.delete(file.path);
+		this.reconcileDirtyPath(file, snapshot);
 		await this.persistNow();
 	}
 
@@ -517,7 +533,8 @@ export class SyncEngine {
 		const settings = this.getSettings();
 		const previous = settings.syncIndex[file.path];
 		const now = Date.now();
-		const content = await this.app.vault.cachedRead(file);
+		const snapshot = await this.readStableSnapshot(file);
+		const { content } = snapshot;
 		let frontmatter: Record<string, unknown>;
 		try {
 			frontmatter = readFrontmatter(content);
@@ -526,8 +543,8 @@ export class SyncEngine {
 				remoteRequest: false,
 				entry: {
 					path: file.path,
-					mtime: file.stat.mtime,
-					size: file.stat.size,
+					mtime: snapshot.mtime,
+					size: snapshot.size,
 					status: 'yaml-error',
 					lastCheckedAt: now,
 					detail: describeError(error),
@@ -540,8 +557,8 @@ export class SyncEngine {
 				remoteRequest: false,
 				entry: {
 					path: file.path,
-					mtime: file.stat.mtime,
-					size: file.stat.size,
+					mtime: snapshot.mtime,
+					size: snapshot.size,
 					status: 'ignored',
 					lastCheckedAt: now,
 					detail: 'yuque_sync: false',
@@ -555,8 +572,8 @@ export class SyncEngine {
 				remoteRequest: false,
 				entry: {
 					path: file.path,
-					mtime: file.stat.mtime,
-					size: file.stat.size,
+					mtime: snapshot.mtime,
+					size: snapshot.size,
 					status: 'unlinked',
 					lastCheckedAt: now,
 				},
@@ -569,8 +586,8 @@ export class SyncEngine {
 				remoteRequest: false,
 				entry: {
 					path: file.path,
-					mtime: file.stat.mtime,
-					size: file.stat.size,
+					mtime: snapshot.mtime,
+					size: snapshot.size,
 					status: 'invalid-link',
 					yuqueLink,
 					lastCheckedAt: now,
@@ -587,8 +604,8 @@ export class SyncEngine {
 				remoteRequest: false,
 				entry: {
 					path: file.path,
-					mtime: file.stat.mtime,
-					size: file.stat.size,
+					mtime: snapshot.mtime,
+					size: snapshot.size,
 					status: localChanged ? 'local-changed' : previousForLink?.status ?? 'unchecked',
 					yuqueLink,
 					localHash,
@@ -612,8 +629,8 @@ export class SyncEngine {
 				remoteRequest: true,
 				entry: {
 					path: file.path,
-					mtime: file.stat.mtime,
-					size: file.stat.size,
+					mtime: snapshot.mtime,
+					size: snapshot.size,
 					status: classification.status,
 					yuqueLink,
 					localHash,
@@ -631,8 +648,8 @@ export class SyncEngine {
 				remoteRequest: true,
 				entry: {
 					path: file.path,
-					mtime: file.stat.mtime,
-					size: file.stat.size,
+					mtime: snapshot.mtime,
+					size: snapshot.size,
 					status,
 					yuqueLink,
 					localHash,
@@ -644,6 +661,27 @@ export class SyncEngine {
 					detail: describeError(error),
 				},
 			};
+		}
+	}
+
+
+	private async readStableSnapshot(file: TFile): Promise<LocalSnapshot> {
+		for (let attempt = 0; attempt < 3; attempt += 1) {
+			const mtime = file.stat.mtime;
+			const size = file.stat.size;
+			const content = await this.app.vault.cachedRead(file);
+			if (file.stat.mtime === mtime && file.stat.size === size) {
+				return { content, mtime, size };
+			}
+		}
+		throw new Error(`${file.path} 在检测期间持续变化，已保留为待重新检测`);
+	}
+
+	private reconcileDirtyPath(file: TFile, snapshot: LocalSnapshot): void {
+		if (file.stat.mtime === snapshot.mtime && file.stat.size === snapshot.size) {
+			this.dirtyPaths.delete(file.path);
+		} else {
+			this.dirtyPaths.add(file.path);
 		}
 	}
 
