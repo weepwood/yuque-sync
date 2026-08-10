@@ -18,18 +18,18 @@ import {
 	getStringProperty,
 	isYuqueSyncDisabled,
 	normalizeBookId,
-	normalizeMarkdownForComparison,
 	readFrontmatter,
 	replaceImageReferences,
 	safeDecodeURIComponent,
 	splitMarkdown,
 } from './src/markdown-utils';
 import { YuqueSyncSettingTab } from './src/settings-tab';
+import { SyncEngine } from './src/sync-engine';
 import { SyncStatusModal } from './src/sync-status-modal';
 import {
 	DEFAULT_SETTINGS,
 	type ImageReference,
-	type SyncScanResult,
+	type ScanMode,
 	type YuqueSyncSettings,
 } from './src/types';
 import { YuqueClient } from './src/yuque-client';
@@ -65,6 +65,7 @@ export default class YuqueSyncPlugin extends Plugin {
 	private statusBarItem!: HTMLElement;
 	private statusTimer: number | null = null;
 	private operationInProgress = false;
+	private syncEngine!: SyncEngine;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -72,9 +73,18 @@ export default class YuqueSyncPlugin extends Plugin {
 			() => this.pluginSettings.yuqueToken,
 			() => this.pluginSettings.yuqueCookie,
 		);
+		this.syncEngine = new SyncEngine(
+			this.app,
+			this.client,
+			() => this.pluginSettings,
+			() => this.saveSettings(),
+			(file) => this.isManagedBackupFile(file),
+			(text) => this.setStatus(text),
+		);
 		this.statusBarItem = this.addStatusBarItem();
 		this.statusBarItem.addClass('yuque-sync-status');
 		await this.cleanupResolvedPendingCreates();
+		this.registerSyncTracking();
 
 		this.addRibbonIcon('cloud-upload', '上传当前文档到语雀', () => {
 			void this.runExclusive('正在上传文档', () => this.uploadActiveDocument());
@@ -98,10 +108,26 @@ export default class YuqueSyncPlugin extends Plugin {
 			},
 		});
 		this.addCommand({
-			id: 'scan-all-documents',
-			name: '检测所有文档同步状态',
+			id: 'scan-incremental-documents',
+			name: '增量检测文档同步状态',
 			callback: () => {
-				void this.runExclusive('正在检测同步状态', () => this.scanAllDocumentsAndShow());
+				void this.runExclusive('正在增量检测同步状态', () => this.scanDocumentsAndShow('incremental'));
+			},
+		});
+		this.addCommand({
+			id: 'scan-all-documents',
+			name: '完整检测所有文档同步状态',
+			callback: () => {
+				void this.runExclusive('正在完整检测同步状态', () => this.scanDocumentsAndShow('full'));
+			},
+		});
+		this.addCommand({
+			id: 'cancel-sync-scan',
+			name: '暂停当前同步检测',
+			callback: () => {
+				new Notice(this.syncEngine.cancelScan()
+					? '已请求暂停同步检测；当前请求完成后会保存进度'
+					: '当前没有正在执行的同步检测');
 			},
 		});
 		this.addCommand({
@@ -131,6 +157,7 @@ export default class YuqueSyncPlugin extends Plugin {
 		if (this.statusTimer !== null) {
 			window.clearTimeout(this.statusTimer);
 		}
+		void this.syncEngine?.flush();
 	}
 
 	async loadSettings(): Promise<void> {
@@ -141,6 +168,12 @@ export default class YuqueSyncPlugin extends Plugin {
 			...saved,
 			yuqueToken: migratedToken,
 			pendingCreates: saved?.pendingCreates ?? {},
+			syncIndex: saved?.syncIndex ?? {},
+			dirtyFiles: saved?.dirtyFiles ?? [],
+			scanSession: saved?.scanSession ?? null,
+			remoteCheckTtlHours: saved?.remoteCheckTtlHours ?? DEFAULT_SETTINGS.remoteCheckTtlHours,
+			remoteFallbackBudget: saved?.remoteFallbackBudget ?? DEFAULT_SETTINGS.remoteFallbackBudget,
+			scanConcurrency: saved?.scanConcurrency ?? DEFAULT_SETTINGS.scanConcurrency,
 		};
 	}
 
@@ -204,12 +237,13 @@ export default class YuqueSyncPlugin extends Plugin {
 			if (latestLink !== yuqueLink) {
 				throw new Error('确认期间 yuque_link 已发生变化，请重新执行上传');
 			}
-			await this.client.updateDocument(
+			const updatedAt = await this.client.updateDocument(
 				location.bookId,
 				location.slug,
 				file.basename,
 				splitMarkdown(latestContent).body,
 			);
+			await this.syncEngine.recordSynchronized(file, yuqueLink, latestContent, updatedAt);
 			new Notice('文档已上传到语雀');
 			this.setStatus('文档上传完成', 3000);
 			return;
@@ -238,106 +272,38 @@ export default class YuqueSyncPlugin extends Plugin {
 		this.setStatus(result.recovered ? '文档关联已恢复' : '文档创建完成', 3000);
 	}
 
-	private async scanAllDocumentsAndShow(): Promise<void> {
+	private async scanDocumentsAndShow(mode: ScanMode): Promise<void> {
 		this.requireToken();
-		const results = await this.scanVault();
-		new SyncStatusModal(
-			this.app,
-			results,
-			() => this.runExclusive('正在检测同步状态', () => this.scanAllDocumentsAndShow()),
-			() => this.runExclusive('正在批量推送文档', () => this.pushUnlinkedDocuments()),
-		).open();
-		this.setStatus(`检测完成：${results.length} 个文档`, 3000);
-	}
-
-	private async scanVault(): Promise<SyncScanResult[]> {
-		const files = this.app.vault.getMarkdownFiles().filter((file) => !this.isManagedBackupFile(file));
-		const results: SyncScanResult[] = [];
-
-		for (const [index, file] of files.entries()) {
-			this.setStatus(`正在检测 ${index + 1}/${files.length}：${file.path}`);
-			let content: string;
-			try {
-				content = await this.app.vault.read(file);
-			} catch (error) {
-				results.push({
-					filePath: file.path,
-					fileName: file.name,
-					status: 'error',
-					detail: `读取失败：${describeError(error)}`,
-				});
-				continue;
-			}
-
-			let frontmatter: Record<string, unknown>;
-			try {
-				frontmatter = readFrontmatter(content);
-			} catch (error) {
-				results.push({
-					filePath: file.path,
-					fileName: file.name,
-					status: 'yaml-error',
-					detail: describeError(error),
-				});
-				continue;
-			}
-
-			if (isYuqueSyncDisabled(frontmatter)) {
-				results.push({
-					filePath: file.path,
-					fileName: file.name,
-					status: 'ignored',
-					detail: 'yuque_sync: false',
-				});
-				continue;
-			}
-
-			const yuqueLink = getStringProperty(frontmatter, 'yuque_link');
-			if (!yuqueLink) {
-				results.push({
-					filePath: file.path,
-					fileName: file.name,
-					status: 'unlinked',
-				});
-				continue;
-			}
-
-			const location = extractYuqueLocation(yuqueLink);
-			if (!location) {
-				results.push({
-					filePath: file.path,
-					fileName: file.name,
-					status: 'invalid-link',
-					yuqueLink,
-					detail: 'yuque_link 不是有效的语雀文档地址',
-				});
-				continue;
-			}
-
-			try {
-				const remote = await this.client.getDocument(location.bookId, location.slug);
-				const localBody = normalizeMarkdownForComparison(splitMarkdown(content).body);
-				const remoteBody = normalizeMarkdownForComparison(splitMarkdown(remote.content).body);
-				results.push({
-					filePath: file.path,
-					fileName: file.name,
-					status: localBody === remoteBody ? 'synced' : 'different',
-					yuqueLink,
-					detail: localBody === remoteBody ? undefined : '本地正文与语雀正文不同',
-				});
-			} catch (error) {
-				results.push({
-					filePath: file.path,
-					fileName: file.name,
-					status: getHttpStatus(error) === 404 ? 'remote-missing' : 'error',
-					yuqueLink,
-					detail: describeError(error),
-				});
+		if (mode === 'full') {
+			const total = this.app.vault.getMarkdownFiles().filter((file) => !this.isManagedBackupFile(file)).length;
+			const confirmed = await ConfirmModal.show(
+				this.app,
+				'执行完整同步检测？',
+				`将深度校验 ${total} 篇 Markdown。完整检测会下载所有已关联语雀文档正文；任务支持暂停和断点继续。`,
+			);
+			if (!confirmed) {
+				return;
 			}
 		}
-		return results;
-	}
 
+		const report = await this.syncEngine.scan(mode);
+		new SyncStatusModal(
+			this.app,
+			report.results,
+			report.summary,
+			(nextMode) => this.runExclusive(
+				nextMode === 'full' ? '正在完整检测同步状态' : '正在增量检测同步状态',
+				() => this.scanDocumentsAndShow(nextMode),
+			),
+			() => this.runExclusive('正在批量推送文档', () => this.pushUnlinkedDocuments()),
+		).open();
+
+		const message = report.summary.canceled
+			? `检测已暂停：本次处理 ${report.summary.scanned} 篇，进度已保存`
+			: `检测完成：实际处理 ${report.summary.scanned} 篇，复用缓存 ${report.summary.cached} 篇，远端正文请求 ${report.summary.remoteBodyRequests} 次`;
+		new Notice(message);
+		this.setStatus(message, 5000);
+	}
 	private async pushUnlinkedDocuments(): Promise<void> {
 		this.requireToken();
 		const bookId = this.requireDefaultBookId();
@@ -410,7 +376,7 @@ export default class YuqueSyncPlugin extends Plugin {
 				continue;
 			}
 			try {
-				const content = await this.app.vault.read(file);
+				const content = await this.app.vault.cachedRead(file);
 				const frontmatter = readFrontmatter(content);
 				if (isYuqueSyncDisabled(frontmatter)) {
 					continue;
@@ -430,7 +396,7 @@ export default class YuqueSyncPlugin extends Plugin {
 		if (this.isManagedBackupFile(file)) {
 			return false;
 		}
-		const content = await this.app.vault.read(file);
+		const content = await this.app.vault.cachedRead(file);
 		const frontmatter = readFrontmatter(content);
 		return !isYuqueSyncDisabled(frontmatter) && !getStringProperty(frontmatter, 'yuque_link');
 	}
@@ -486,6 +452,7 @@ export default class YuqueSyncPlugin extends Plugin {
 		const addedToToc = await this.client.addDocumentToToc(bookId, created.id);
 		delete this.pluginSettings.pendingCreates[file.path];
 		await this.saveSettings();
+		await this.syncEngine.recordSynchronized(file, yuqueLink, content, created.updatedAt);
 		return { yuqueLink, addedToToc, recovered: false };
 	}
 
@@ -523,6 +490,7 @@ export default class YuqueSyncPlugin extends Plugin {
 		const addedToToc = await this.client.addDocumentToToc(location.bookId, pending.documentId);
 		delete this.pluginSettings.pendingCreates[file.path];
 		await this.saveSettings();
+		await this.syncEngine.recordRemoteComparison(file, pending.yuqueLink, remote.content, remote.updatedAt);
 		return { yuqueLink: pending.yuqueLink, addedToToc, recovered: true };
 	}
 
@@ -536,7 +504,7 @@ export default class YuqueSyncPlugin extends Plugin {
 				continue;
 			}
 			try {
-				const content = await this.app.vault.read(abstractFile);
+				const content = await this.app.vault.cachedRead(abstractFile);
 				if (getStringProperty(readFrontmatter(content), 'yuque_link')) {
 					delete this.pluginSettings.pendingCreates[filePath];
 					changed = true;
@@ -614,6 +582,7 @@ export default class YuqueSyncPlugin extends Plugin {
 				metadata.yuque_updated_at = document.updatedAt;
 			}
 		});
+		await this.syncEngine.recordSynchronized(file, yuqueLink, nextContent, document.updatedAt);
 
 		new Notice(`下载完成，原文件已备份到 ${backupPath}`);
 		this.setStatus('文档下载完成', 3000);
@@ -656,6 +625,33 @@ export default class YuqueSyncPlugin extends Plugin {
 		return path === BACKUP_ROOT
 			|| path.startsWith(`${BACKUP_ROOT}/`)
 			|| LEGACY_BACKUP_PATTERN.test(path);
+	}
+
+	private registerSyncTracking(): void {
+		this.app.workspace.onLayoutReady(() => {
+			this.registerEvent(this.app.vault.on('create', (file: TAbstractFile) => {
+				if (file instanceof TFile && file.extension === 'md' && !this.isManagedBackupFile(file)) {
+					this.syncEngine.markDirty(file.path);
+				}
+			}));
+			this.registerEvent(this.app.vault.on('modify', (file: TAbstractFile) => {
+				if (file instanceof TFile && file.extension === 'md' && !this.isManagedBackupFile(file)) {
+					this.syncEngine.markDirty(file.path);
+				}
+			}));
+			this.registerEvent(this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {
+				if (file instanceof TFile && file.extension === 'md' && !this.isManagedBackupFile(file)) {
+					this.syncEngine.renamePath(oldPath, file.path);
+				} else {
+					this.syncEngine.removePath(oldPath);
+				}
+			}));
+			this.registerEvent(this.app.vault.on('delete', (file: TAbstractFile) => {
+				if (file instanceof TFile && file.extension === 'md') {
+					this.syncEngine.removePath(file.path);
+				}
+			}));
+		});
 	}
 
 	private registerEditorImageMenu(): void {

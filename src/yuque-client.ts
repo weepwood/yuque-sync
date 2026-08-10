@@ -1,5 +1,9 @@
 import { requestUrl } from 'obsidian';
-import type { CreatedYuqueDocument, YuqueDocument } from './types';
+import type {
+	CreatedYuqueDocument,
+	RemoteYuqueDocumentMeta,
+	YuqueDocument,
+} from './types';
 
 interface YuqueEnvelope<T> {
 	data: T;
@@ -12,6 +16,9 @@ interface YuqueDocumentPayload {
 	body?: string;
 	updated_at?: string;
 }
+
+const DOCUMENT_LIST_PAGE_SIZE = 100;
+const MAX_DOCUMENT_LIST_PAGES = 500;
 
 export class YuqueClient {
 	constructor(
@@ -33,8 +40,50 @@ export class YuqueClient {
 		};
 	}
 
-	async updateDocument(bookId: string, slug: string, title: string, content: string): Promise<void> {
-		await requestUrl({
+	async listDocuments(bookId: string): Promise<RemoteYuqueDocumentMeta[]> {
+		const results: RemoteYuqueDocumentMeta[] = [];
+		const seen = new Set<string>();
+		let offset = 0;
+
+		for (let page = 0; page < MAX_DOCUMENT_LIST_PAGES; page += 1) {
+			const response = await requestUrl({
+				url: `${this.apiBase(bookId)}/docs?offset=${offset}&limit=${DOCUMENT_LIST_PAGE_SIZE}`,
+				method: 'GET',
+				headers: this.authHeaders(),
+			});
+			const payload = response.json as YuqueEnvelope<YuqueDocumentPayload[]>;
+			if (!Array.isArray(payload.data)) {
+				throw new Error('语雀文档列表接口返回了未知数据格式');
+			}
+			if (payload.data.length === 0) {
+				break;
+			}
+
+			let added = 0;
+			for (const document of payload.data) {
+				if (!document.slug || seen.has(document.slug)) {
+					continue;
+				}
+				seen.add(document.slug);
+				results.push({
+					slug: document.slug,
+					updatedAt: document.updated_at ?? '',
+				});
+				added += 1;
+			}
+
+			// 如果服务端忽略 offset/limit 并重复返回同一页，避免死循环。
+			if (added === 0 || payload.data.length < DOCUMENT_LIST_PAGE_SIZE) {
+				break;
+			}
+			offset += payload.data.length;
+		}
+
+		return results;
+	}
+
+	async updateDocument(bookId: string, slug: string, title: string, content: string): Promise<string> {
+		const response = await requestUrl({
 			url: `${this.apiBase(bookId)}/docs/${encodeURIComponent(slug)}`,
 			method: 'PUT',
 			headers: this.authHeaders(),
@@ -45,6 +94,8 @@ export class YuqueClient {
 				body: content,
 			}),
 		});
+		const payload = response.json as Partial<YuqueEnvelope<YuqueDocumentPayload>>;
+		return payload.data?.updated_at ?? '';
 	}
 
 	async createDocument(bookId: string, title: string, content: string): Promise<CreatedYuqueDocument> {
@@ -63,7 +114,11 @@ export class YuqueClient {
 		if (!payload.data?.id || !payload.data.slug) {
 			throw new Error('语雀创建文档接口未返回文档 ID 或 slug');
 		}
-		return { id: payload.data.id, slug: payload.data.slug };
+		return {
+			id: payload.data.id,
+			slug: payload.data.slug,
+			updatedAt: payload.data.updated_at ?? '',
+		};
 	}
 
 	async addDocumentToToc(bookId: string, documentId: number): Promise<boolean> {
