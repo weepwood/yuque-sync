@@ -3,7 +3,6 @@ name: Build, Compatibility and Release
 on:
   push:
     branches: [master]
-    tags: ["v*"]
   pull_request:
     branches: [master]
   workflow_dispatch:
@@ -16,8 +15,44 @@ permissions:
   contents: read
 
 jobs:
+  sync-lockfile:
+    name: Sync package lock
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          package-manager-cache: true
+
+      - name: Refresh package lock for same-repository pull requests
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        run: npm install --package-lock-only --ignore-scripts
+
+      - name: Commit refreshed package lock
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          if git diff --quiet -- package-lock.json; then
+            echo "package-lock.json is already current"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package-lock.json
+          git commit -m "发布：同步 1.2.0 依赖锁文件"
+          git push
+
   build:
     name: Lint, typecheck and build
+    needs: sync-lockfile
     runs-on: ubuntu-latest
 
     steps:
@@ -44,6 +79,7 @@ jobs:
 
   obsidian-compatibility:
     name: Latest Obsidian API compatibility
+    needs: sync-lockfile
     runs-on: ubuntu-latest
 
     steps:
@@ -69,8 +105,8 @@ jobs:
         run: npm run typecheck
 
   release:
-    name: Build GitHub Release
-    if: startsWith(github.ref, 'refs/tags/v')
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     needs: [build, obsidian-compatibility]
     runs-on: ubuntu-latest
     permissions:
@@ -89,24 +125,44 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
 
-      - name: Verify release versions
+      - name: Read and verify release version
+        id: version
         run: |
-          node -e "const p=require('./package.json');const m=require('./manifest.json');const tag=process.env.GITHUB_REF_NAME.replace(/^v/,'');if(p.version!==m.version||p.version!==tag){throw new Error('package.json、manifest.json 与标签版本不一致')}"
+          VERSION=$(node -p "require('./package.json').version")
+          node -e "const p=require('./package.json');const m=require('./manifest.json');const v=require('./versions.json');if(p.version!==m.version){throw new Error('package.json 与 manifest.json 版本不一致')}if(v[p.version]!==m.minAppVersion){throw new Error('versions.json 与 manifest.json 的最低版本不一致')}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether release already exists
+        id: release_check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build release files
+        if: steps.release_check.outputs.exists != 'true'
         run: npm run build
 
       - name: Verify release files
+        if: steps.release_check.outputs.exists != 'true'
         run: |
           test -s main.js
           test -s manifest.json
           test -s styles.css
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            main.js
-            manifest.json
-            styles.css
-          generate_release_notes: true
+      - name: Create tag and GitHub Release
+        if: steps.release_check.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release create "$VERSION" \
+            main.js manifest.json styles.css \
+            --title "$VERSION" \
+            --target "$GITHUB_SHA" \
+            --generate-notes
