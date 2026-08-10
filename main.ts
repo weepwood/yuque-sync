@@ -59,7 +59,7 @@ function getHttpStatus(error: unknown): number | null {
 }
 
 export default class YuqueSyncPlugin extends Plugin {
-	settings: YuqueSyncSettings = { ...DEFAULT_SETTINGS };
+	pluginSettings: YuqueSyncSettings = { ...DEFAULT_SETTINGS };
 
 	private client!: YuqueClient;
 	private statusBarItem!: HTMLElement;
@@ -69,8 +69,8 @@ export default class YuqueSyncPlugin extends Plugin {
 	async onload(): Promise<void> {
 		await this.loadSettings();
 		this.client = new YuqueClient(
-			() => this.settings.yuqueToken,
-			() => this.settings.yuqueCookie,
+			() => this.pluginSettings.yuqueToken,
+			() => this.pluginSettings.yuqueCookie,
 		);
 		this.statusBarItem = this.addStatusBarItem();
 		this.statusBarItem.addClass('yuque-sync-status');
@@ -136,7 +136,7 @@ export default class YuqueSyncPlugin extends Plugin {
 	async loadSettings(): Promise<void> {
 		const saved = await this.loadData() as (Partial<YuqueSyncSettings> & { mySetting?: string }) | null;
 		const migratedToken = saved?.yuqueToken || saved?.mySetting || '';
-		this.settings = {
+		this.pluginSettings = {
 			...DEFAULT_SETTINGS,
 			...saved,
 			yuqueToken: migratedToken,
@@ -145,7 +145,7 @@ export default class YuqueSyncPlugin extends Plugin {
 	}
 
 	async saveSettings(): Promise<void> {
-		await this.saveData(this.settings);
+		await this.saveData(this.pluginSettings);
 	}
 
 	private async runExclusive(label: string, operation: () => Promise<void>): Promise<void> {
@@ -456,7 +456,7 @@ export default class YuqueSyncPlugin extends Plugin {
 			splitMarkdown(content).body,
 		);
 		const yuqueLink = `https://www.yuque.com/${bookId}/${created.slug}`;
-		this.settings.pendingCreates[file.path] = {
+		this.pluginSettings.pendingCreates[file.path] = {
 			yuqueLink,
 			documentId: created.id,
 			createdAt: Date.now(),
@@ -479,24 +479,24 @@ export default class YuqueSyncPlugin extends Plugin {
 			throw new Error(`语雀文档已创建，但本地文档在同步期间设置了 yuque_sync: false，因此未写回链接。新文档：${yuqueLink}`);
 		}
 
-		await this.app.fileManager.processFrontMatter(file, (metadata) => {
+		await this.app.fileManager.processFrontMatter(file, (metadata: Record<string, unknown>) => {
 			metadata.yuque_link = yuqueLink;
 			metadata.yuque_title = file.basename;
 		});
 		const addedToToc = await this.client.addDocumentToToc(bookId, created.id);
-		delete this.settings.pendingCreates[file.path];
+		delete this.pluginSettings.pendingCreates[file.path];
 		await this.saveSettings();
 		return { yuqueLink, addedToToc, recovered: false };
 	}
 
 	private async recoverPendingCreate(file: TFile): Promise<CreateDocumentResult | null> {
-		const pending = this.settings.pendingCreates[file.path];
+		const pending = this.pluginSettings.pendingCreates[file.path];
 		if (!pending) {
 			return null;
 		}
 		const location = extractYuqueLocation(pending.yuqueLink);
 		if (!location) {
-			delete this.settings.pendingCreates[file.path];
+			delete this.pluginSettings.pendingCreates[file.path];
 			await this.saveSettings();
 			return null;
 		}
@@ -506,14 +506,14 @@ export default class YuqueSyncPlugin extends Plugin {
 			remote = await this.client.getDocument(location.bookId, location.slug);
 		} catch (error) {
 			if (getHttpStatus(error) === 404) {
-				delete this.settings.pendingCreates[file.path];
+				delete this.pluginSettings.pendingCreates[file.path];
 				await this.saveSettings();
 				return null;
 			}
 			throw error;
 		}
 
-		await this.app.fileManager.processFrontMatter(file, (metadata) => {
+		await this.app.fileManager.processFrontMatter(file, (metadata: Record<string, unknown>) => {
 			metadata.yuque_link = pending.yuqueLink;
 			metadata.yuque_title = remote.title || file.basename;
 			if (remote.updatedAt) {
@@ -521,24 +521,24 @@ export default class YuqueSyncPlugin extends Plugin {
 			}
 		});
 		const addedToToc = await this.client.addDocumentToToc(location.bookId, pending.documentId);
-		delete this.settings.pendingCreates[file.path];
+		delete this.pluginSettings.pendingCreates[file.path];
 		await this.saveSettings();
 		return { yuqueLink: pending.yuqueLink, addedToToc, recovered: true };
 	}
 
 	private async cleanupResolvedPendingCreates(): Promise<void> {
 		let changed = false;
-		for (const [filePath] of Object.entries(this.settings.pendingCreates)) {
+		for (const [filePath] of Object.entries(this.pluginSettings.pendingCreates)) {
 			const abstractFile = this.app.vault.getAbstractFileByPath(filePath);
 			if (!(abstractFile instanceof TFile)) {
-				delete this.settings.pendingCreates[filePath];
+				delete this.pluginSettings.pendingCreates[filePath];
 				changed = true;
 				continue;
 			}
 			try {
 				const content = await this.app.vault.read(abstractFile);
 				if (getStringProperty(readFrontmatter(content), 'yuque_link')) {
-					delete this.settings.pendingCreates[filePath];
+					delete this.pluginSettings.pendingCreates[filePath];
 					changed = true;
 				}
 			} catch {
@@ -607,7 +607,7 @@ export default class YuqueSyncPlugin extends Plugin {
 			? `${frontmatterBlock}\n${remoteBody}`
 			: remoteBody;
 		await this.app.vault.modify(file, nextContent);
-		await this.app.fileManager.processFrontMatter(file, (metadata) => {
+		await this.app.fileManager.processFrontMatter(file, (metadata: Record<string, unknown>) => {
 			metadata.yuque_link = yuqueLink;
 			metadata.yuque_title = document.title;
 			if (document.updatedAt) {
@@ -811,13 +811,13 @@ export default class YuqueSyncPlugin extends Plugin {
 	}
 
 	private requireToken(): void {
-		if (!this.settings.yuqueToken.trim()) {
+		if (!this.pluginSettings.yuqueToken.trim()) {
 			throw new Error('请先在插件设置中配置 Yuque Token');
 		}
 	}
 
 	private requireDefaultBookId(): string {
-		const bookId = normalizeBookId(this.settings.defaultBookId);
+		const bookId = normalizeBookId(this.pluginSettings.defaultBookId);
 		if (!bookId) {
 			throw new Error('请在设置中填写格式为 namespace/book 的默认知识库');
 		}
@@ -825,7 +825,7 @@ export default class YuqueSyncPlugin extends Plugin {
 	}
 
 	private requireCookie(): void {
-		if (!this.settings.yuqueCookie.trim()) {
+		if (!this.pluginSettings.yuqueCookie.trim()) {
 			throw new Error('请先在插件设置中配置 Yuque Cookie');
 		}
 	}
