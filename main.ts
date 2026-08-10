@@ -18,7 +18,6 @@ import {
 	getStringProperty,
 	isYuqueSyncDisabled,
 	normalizeBookId,
-	normalizeMarkdownForComparison,
 	readFrontmatter,
 	replaceImageReferences,
 	safeDecodeURIComponent,

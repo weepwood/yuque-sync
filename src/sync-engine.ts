@@ -18,7 +18,7 @@ import type {
 } from './types';
 import type { YuqueClient } from './yuque-client';
 
-const INDEX_SAVE_INTERVAL = 100;
+const INDEX_SAVE_INTERVAL = 500;
 const DIRTY_SAVE_DELAY_MS = 1500;
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY_MS = 750;
@@ -365,7 +365,8 @@ export class SyncEngine {
 		const localHash = await hashMarkdownBody(localContent);
 		const remoteHash = await hashMarkdownBody(remoteContent);
 		const previous = this.getSettings().syncIndex[file.path];
-		const classification = classifyHashes(localHash, remoteHash, previous?.lastSyncedHash);
+		const previousForLink = previous?.yuqueLink === yuqueLink ? previous : undefined;
+		const classification = classifyHashes(localHash, remoteHash, previousForLink?.lastSyncedHash);
 		const now = Date.now();
 		this.getSettings().syncIndex[file.path] = {
 			path: file.path,
@@ -579,26 +580,26 @@ export class SyncEngine {
 		}
 
 		const localHash = await hashMarkdownBody(content);
+		const previousForLink = previous?.yuqueLink === yuqueLink ? previous : undefined;
 		if (mode === 'incremental' && !remoteRequired) {
+			const localChanged = Boolean(previousForLink?.lastSyncedHash && localHash !== previousForLink.lastSyncedHash);
 			return {
 				remoteRequest: false,
 				entry: {
 					path: file.path,
 					mtime: file.stat.mtime,
 					size: file.stat.size,
-					status: previous?.lastSyncedHash && localHash !== previous.lastSyncedHash
-						? 'local-changed'
-						: previous?.status ?? 'unchecked',
+					status: localChanged ? 'local-changed' : previousForLink?.status ?? 'unchecked',
 					yuqueLink,
 					localHash,
-					remoteHash: previous?.remoteHash,
-					lastSyncedHash: previous?.lastSyncedHash,
-					remoteUpdatedAt: previous?.remoteUpdatedAt,
-					remoteCheckedAt: previous?.remoteCheckedAt,
+					remoteHash: previousForLink?.remoteHash,
+					lastSyncedHash: previousForLink?.lastSyncedHash,
+					remoteUpdatedAt: previousForLink?.remoteUpdatedAt,
+					remoteCheckedAt: previousForLink?.remoteCheckedAt,
 					lastCheckedAt: now,
-					detail: previous?.lastSyncedHash && localHash !== previous.lastSyncedHash
+					detail: localChanged
 						? statusDetail('local-changed')
-						: previous?.detail ?? statusDetail('unchecked'),
+						: previousForLink?.detail ?? statusDetail('unchecked'),
 				},
 			};
 		}
@@ -606,7 +607,7 @@ export class SyncEngine {
 		try {
 			const remote = await withRetry(() => this.client.getDocument(location.bookId, location.slug));
 			const remoteHash = await hashMarkdownBody(remote.content);
-			const classification = classifyHashes(localHash, remoteHash, previous?.lastSyncedHash);
+			const classification = classifyHashes(localHash, remoteHash, previousForLink?.lastSyncedHash);
 			return {
 				remoteRequest: true,
 				entry: {
@@ -635,9 +636,9 @@ export class SyncEngine {
 					status,
 					yuqueLink,
 					localHash,
-					remoteHash: previous?.remoteHash,
-					lastSyncedHash: previous?.lastSyncedHash,
-					remoteUpdatedAt: previous?.remoteUpdatedAt,
+					remoteHash: previousForLink?.remoteHash,
+					lastSyncedHash: previousForLink?.lastSyncedHash,
+					remoteUpdatedAt: previousForLink?.remoteUpdatedAt,
 					remoteCheckedAt: now,
 					lastCheckedAt: now,
 					detail: describeError(error),
