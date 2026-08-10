@@ -39,15 +39,15 @@ const SUMMARY_STATUSES: SyncStatus[] = [
 	'conflict',
 	'local-changed',
 	'remote-changed',
-	different,
-	unlinked,
-	unchecked,
+	'different',
+	'unlinked',
+	'unchecked',
 	'invalid-link',
 	'remote-missing',
 	'yaml-error',
-	error,
-	ignored,
-	synced,
+	'error',
+	'ignored',
+	'synced',
 ];
 
 function formatDuration(milliseconds: number): string {
@@ -212,9 +212,9 @@ export class SyncStatusModal extends Modal {
 		const toolbar = section.createDiv({ cls: 'yuque-sync-filter-toolbar' });
 		const searchWrap = toolbar.createDiv({ cls: 'yuque-sync-search-wrap' });
 		const search = searchWrap.createEl('input', {
-			type: 'search',
 			cls: 'yuque-sync-search-input',
 			attr: {
+				type: 'search',
 				placeholder: '搜索文档路径、详情或语雀链接…',
 				'aria-label': '搜索同步结果',
 			},
