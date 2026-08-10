@@ -16,7 +16,9 @@ export class YuqueSyncSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
-		containerEl.createEl('h2', { text: '语雀同步' });
+		new Setting(containerEl)
+			.setName('语雀同步')
+			.setHeading();
 		containerEl.createEl('p', {
 			text: 'Token 和 Cookie 会保存在当前 Obsidian 仓库的插件数据目录中。请勿共享 data.json。',
 			cls: 'setting-item-description',
