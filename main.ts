@@ -501,7 +501,7 @@ export default class YuqueSyncPlugin extends Plugin {
 			return null;
 		}
 
-		let remote;
+		let remote: { title: string; content: string; updatedAt: string };
 		try {
 			remote = await this.client.getDocument(location.bookId, location.slug);
 		} catch (error) {
