@@ -1,6 +1,6 @@
 {
 	"name": "yuque-sync",
-	"version": "1.1.0",
+	"version": "1.2.0",
 	"description": "在 Obsidian 与语雀之间同步 Markdown 文档",
 	"main": "main.js",
 	"type": "module",
