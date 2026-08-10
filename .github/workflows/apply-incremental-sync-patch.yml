@@ -24,19 +24,22 @@ jobs:
           cache: npm
           package-manager-cache: true
       - name: Apply review fixes
-        run: node scripts/apply-sync-engine-review-fixes.mjs
+        run: |
+          node scripts/apply-sync-engine-review-fixes.mjs
+          rm scripts/apply-sync-engine-review-fixes.mjs
+          sed -i '/normalizeMarkdownForComparison,/d' main.ts
       - name: Install dependencies
         run: npm ci
       - name: Validate
         run: npm run check
-      - name: Commit engine fixes
+      - name: Commit review fixes
         run: |
-          if git diff --quiet -- src/sync-engine.ts; then
-            echo "No engine fixes needed"
-            exit 0
-          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/sync-engine.ts
-          git commit -m "性能：减少索引写入并隔离链接基线"
+          git add -A src/sync-engine.ts main.ts scripts
+          if git diff --cached --quiet; then
+            echo "No review fixes needed"
+            exit 0
+          fi
+          git commit -m "性能：完成万级笔记增量同步审查修复"
           git push
