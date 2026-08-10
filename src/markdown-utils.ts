@@ -38,14 +38,17 @@ export function extractYuqueLocation(value: string): YuqueLocation | null {
 			return null;
 		}
 
-		const segments = url.pathname.split('/').filter(Boolean).map((segment) => decodeURIComponent(segment));
-		if (segments.length < 3) {
+		const [namespace, book, slug] = url.pathname
+			.split('/')
+			.filter(Boolean)
+			.map((segment) => decodeURIComponent(segment));
+		if (!namespace || !book || !slug) {
 			return null;
 		}
 
 		return {
-			bookId: `${segments[0]}/${segments[1]}`,
-			slug: segments[2],
+			bookId: `${namespace}/${book}`,
+			slug,
 		};
 	} catch {
 		return null;
@@ -54,7 +57,11 @@ export function extractYuqueLocation(value: string): YuqueLocation | null {
 
 export function normalizeBookId(value: string): string | null {
 	const segments = value.trim().split('/').filter(Boolean);
-	return segments.length === 2 ? `${segments[0]}/${segments[1]}` : null;
+	if (segments.length !== 2) {
+		return null;
+	}
+	const [namespace, book] = segments;
+	return namespace && book ? `${namespace}/${book}` : null;
 }
 
 export function splitMarkdown(content: string): { frontmatterBlock: string; body: string } {
@@ -100,6 +107,21 @@ export function getStringProperty(source: Record<string, unknown>, key: string):
 	return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
+export function isYuqueSyncDisabled(source: Record<string, unknown>): boolean {
+	const value = source.yuque_sync;
+	if (value === false) {
+		return true;
+	}
+	if (typeof value !== 'string') {
+		return false;
+	}
+	return ['false', 'off', 'no', '0'].includes(value.trim().toLowerCase());
+}
+
+export function normalizeMarkdownForComparison(content: string): string {
+	return content.replace(/\r\n?/g, '\n').trim();
+}
+
 export function findImageReferences(content: string): ImageReference[] {
 	const references: ImageReference[] = [];
 	const markdownPattern = /!\[[^\]]*\]\(([^)\n]+)\)/g;
@@ -107,6 +129,9 @@ export function findImageReferences(content: string): ImageReference[] {
 
 	while ((match = markdownPattern.exec(content)) !== null) {
 		const rawTarget = match[1];
+		if (!rawTarget) {
+			continue;
+		}
 		const leadingWhitespace = rawTarget.search(/\S|$/);
 		const target = rawTarget.trim();
 		let path = target;
@@ -144,6 +169,9 @@ export function findImageReferences(content: string): ImageReference[] {
 	const wikiPattern = /!\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]/g;
 	while ((match = wikiPattern.exec(content)) !== null) {
 		const rawPath = match[1];
+		if (!rawPath) {
+			continue;
+		}
 		const path = rawPath.trim();
 		if (!path || REMOTE_RESOURCE_PATTERN.test(path)) {
 			continue;

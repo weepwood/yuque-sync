@@ -1,9 +1,8 @@
-name: Build and Release
+name: Build, Compatibility and Release
 
 on:
   push:
     branches: [master]
-    tags: ["v*"]
   pull_request:
     branches: [master]
   workflow_dispatch:
@@ -12,62 +11,121 @@ concurrency:
   group: yuque-sync-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   build:
+    name: Lint, typecheck and build
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - name: Use Node.js 20
-        uses: actions/setup-node@v4
+      - name: Use Node.js 24
+        uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
+          package-manager-cache: true
 
-      - name: Install dependencies
+      - name: Install locked dependencies
         run: npm ci
 
-      - name: Typecheck and build
-        run: npm run build
+      - name: Run project checks
+        run: npm run check
 
-      - name: Verify build output
-        run: test -s main.js
+      - name: Verify plugin files
+        run: |
+          test -s main.js
+          test -s manifest.json
+          test -s styles.css
 
-      - name: Upload plugin artifact
-        uses: actions/upload-artifact@v4
+  obsidian-compatibility:
+    name: Latest Obsidian API compatibility
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@v6
         with:
-          name: yuque-sync-${{ github.sha }}
-          path: |
-            main.js
-            manifest.json
-            styles.css
-          if-no-files-found: error
+          node-version: 24
+          cache: npm
+          package-manager-cache: true
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Install latest Obsidian API types
+        run: npm install --no-save --package-lock=false obsidian@latest
+
+      - name: Show Obsidian API version
+        run: node -e "console.log('obsidian-api', require('obsidian/package.json').version)"
+
+      - name: Typecheck against latest Obsidian API
+        run: npm run typecheck
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: [build, obsidian-compatibility]
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - name: Verify release versions
+      - name: Use Node.js 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          package-manager-cache: true
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Read and verify release version
+        id: version
         run: |
-          node -e "const p=require('./package.json');const m=require('./manifest.json');const tag=process.env.GITHUB_REF_NAME.replace(/^v/,'');if(p.version!==m.version||p.version!==tag){throw new Error('package.json、manifest.json 与标签版本不一致')}"
+          VERSION=$(node -p "require('./package.json').version")
+          node -e "const p=require('./package.json');const m=require('./manifest.json');const v=require('./versions.json');if(p.version!==m.version){throw new Error('package.json 与 manifest.json 版本不一致')}if(v[p.version]!==m.minAppVersion){throw new Error('versions.json 与 manifest.json 的最低版本不一致')}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Download plugin artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: yuque-sync-${{ github.sha }}
-          path: release-files
+      - name: Check whether release already exists
+        id: release_check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: release-files/*
-          generate_release_notes: true
+      - name: Build release files
+        if: steps.release_check.outputs.exists != 'true'
+        run: npm run build
+
+      - name: Verify release files
+        if: steps.release_check.outputs.exists != 'true'
+        run: |
+          test -s main.js
+          test -s manifest.json
+          test -s styles.css
+
+      - name: Create tag and GitHub Release
+        if: steps.release_check.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release create "$VERSION" \
+            main.js manifest.json styles.css \
+            --title "$VERSION" \
+            --target "$GITHUB_SHA" \
+            --generate-notes

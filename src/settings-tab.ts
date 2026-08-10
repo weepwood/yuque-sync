@@ -2,7 +2,7 @@ import { App, Plugin, PluginSettingTab, Setting } from 'obsidian';
 import type { YuqueSyncSettings } from './types';
 
 export interface SettingsHost {
-	settings: YuqueSyncSettings;
+	pluginSettings: YuqueSyncSettings;
 	saveSettings(): Promise<void>;
 }
 
@@ -16,7 +16,9 @@ export class YuqueSyncSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
-		containerEl.createEl('h2', { text: '语雀同步' });
+		new Setting(containerEl)
+			.setName('语雀同步')
+			.setHeading();
 		containerEl.createEl('p', {
 			text: 'Token 和 Cookie 会保存在当前 Obsidian 仓库的插件数据目录中。请勿共享 data.json。',
 			cls: 'setting-item-description',
@@ -27,9 +29,9 @@ export class YuqueSyncSettingTab extends PluginSettingTab {
 			.setDesc('用于文档读取、创建和更新。可在语雀账户设置中生成。')
 			.addText((text) => {
 				text.setPlaceholder('请输入 Token')
-					.setValue(this.host.settings.yuqueToken)
+					.setValue(this.host.pluginSettings.yuqueToken)
 					.onChange((value) => {
-						this.host.settings.yuqueToken = value.trim();
+						this.host.pluginSettings.yuqueToken = value.trim();
 						this.scheduleSave();
 					});
 				text.inputEl.type = 'password';
@@ -41,9 +43,9 @@ export class YuqueSyncSettingTab extends PluginSettingTab {
 			.setDesc('新建语雀文档时使用，格式为 namespace/book。')
 			.addText((text) => text
 				.setPlaceholder('weepwood/test')
-				.setValue(this.host.settings.defaultBookId)
+				.setValue(this.host.pluginSettings.defaultBookId)
 				.onChange((value) => {
-					this.host.settings.defaultBookId = value.trim();
+					this.host.pluginSettings.defaultBookId = value.trim();
 					this.scheduleSave();
 				}));
 
@@ -52,9 +54,9 @@ export class YuqueSyncSettingTab extends PluginSettingTab {
 			.setDesc('仅用于语雀图片上传。该接口依赖网页 Cookie，可能随语雀接口调整而失效。')
 			.addTextArea((text) => {
 				text.setPlaceholder('cookie=...')
-					.setValue(this.host.settings.yuqueCookie)
+					.setValue(this.host.pluginSettings.yuqueCookie)
 					.onChange((value) => {
-						this.host.settings.yuqueCookie = value.trim();
+						this.host.pluginSettings.yuqueCookie = value.trim();
 						this.scheduleSave();
 					});
 				text.inputEl.addClass('yuque-sync-secret-input');
