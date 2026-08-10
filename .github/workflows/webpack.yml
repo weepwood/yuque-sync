@@ -1,4 +1,4 @@
-name: Build and Release
+name: Build, Compatibility and Release
 
 on:
   push:
@@ -12,63 +12,101 @@ concurrency:
   group: yuque-sync-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   build:
+    name: Reproducible build
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - name: Use Node.js 20
-        uses: actions/setup-node@v4
+      - name: Use Node.js 24
+        uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
+          package-manager-cache: true
 
-      - name: Install dependencies
+      - name: Install locked dependencies
         run: npm ci
 
       - name: Typecheck and build
         run: npm run build
 
-      - name: Verify build output
-        run: test -s main.js
+      - name: Verify plugin files
+        run: |
+          test -s main.js
+          test -s manifest.json
+          test -s styles.css
 
-      - name: Upload plugin artifact
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
+  obsidian-compatibility:
+    name: Latest Obsidian API compatibility
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@v6
         with:
-          name: yuque-sync-${{ github.sha }}
-          path: |
-            main.js
-            manifest.json
-            styles.css
-          if-no-files-found: error
+          node-version: 24
+          cache: npm
+          package-manager-cache: true
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Install latest Obsidian API types for compatibility check
+        run: npm install --no-save --package-lock=false obsidian@latest
+
+      - name: Show Obsidian API version
+        run: node -e "console.log('obsidian-api', require('obsidian/package.json').version)"
+
+      - name: Typecheck against latest Obsidian API
+        run: npm run typecheck
 
   release:
+    name: Build GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, obsidian-compatibility]
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          package-manager-cache: true
+
+      - name: Install dependencies
+        run: npm ci
 
       - name: Verify release versions
         run: |
           node -e "const p=require('./package.json');const m=require('./manifest.json');const tag=process.env.GITHUB_REF_NAME.replace(/^v/,'');if(p.version!==m.version||p.version!==tag){throw new Error('package.json、manifest.json 与标签版本不一致')}"
 
-      - name: Download plugin artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: yuque-sync-${{ github.sha }}
-          path: release-files
+      - name: Build release files
+        run: npm run build
+
+      - name: Verify release files
+        run: |
+          test -s main.js
+          test -s manifest.json
+          test -s styles.css
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: release-files/*
+          files: |
+            main.js
+            manifest.json
+            styles.css
           generate_release_notes: true
