@@ -9,6 +9,7 @@ import {
 	TFile,
 	normalizePath,
 } from 'obsidian';
+import { createBatchPushFailure } from './src/batch-push-error';
 import { ConfirmModal } from './src/confirm-modal';
 import {
 	describeError,
@@ -241,8 +242,9 @@ export default class YuqueSyncPlugin extends Plugin {
 			}
 			console.error('[Yuque Sync] 操作失败', error);
 			const message = describeError(error);
-			new Notice(`语雀同步失败：${message}`);
-			this.setStatus(`语雀同步失败：${message}`, 5000);
+			const failureMessage = `语雀同步失败：${message}`;
+			new Notice(failureMessage, 12000);
+			this.setStatus(failureMessage, 10000);
 		} finally {
 			this.operationInProgress = false;
 			if (this.statusBarItem.textContent === `${label}…`) {
@@ -370,7 +372,6 @@ export default class YuqueSyncPlugin extends Plugin {
 
 		let success = 0;
 		let recovered = 0;
-		let failed = 0;
 		let skipped = 0;
 		let tocFailed = 0;
 		for (const [index, file] of files.entries()) {
@@ -389,8 +390,17 @@ export default class YuqueSyncPlugin extends Plugin {
 					tocFailed += 1;
 				}
 			} catch (error) {
-				failed += 1;
-				console.error(`[Yuque Sync] 批量创建失败：${file.path}`, error);
+				console.error(`[Yuque Sync] 批量创建失败并停止：${file.path}`, error);
+				throw createBatchPushFailure({
+					filePath: file.path,
+					index,
+					total: files.length,
+					success,
+					recovered,
+					skipped,
+					tocFailed,
+					error,
+				});
 			}
 		}
 
@@ -400,9 +410,6 @@ export default class YuqueSyncPlugin extends Plugin {
 		}
 		if (skipped) {
 			parts.push(`跳过 ${skipped}`);
-		}
-		if (failed) {
-			parts.push(`失败 ${failed}`);
 		}
 		if (tocFailed) {
 			parts.push(`目录加入失败 ${tocFailed}`);
