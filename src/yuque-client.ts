@@ -213,8 +213,7 @@ export class YuqueClient {
 			try {
 				return await this.rateLimiter.schedule(operation, priority);
 			} catch (error) {
-				const rateLimited = this.rateLimiter.observeRateLimit(error);
-				if (!rateLimited || attempt >= MAX_RATE_LIMIT_RETRIES) {
+				if (!this.rateLimiter.isRateLimitError(error) || attempt >= MAX_RATE_LIMIT_RETRIES) {
 					throw error;
 				}
 			}
