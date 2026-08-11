@@ -1,7 +1,7 @@
 {
 	"id": "yuque-sync",
 	"name": "Yuque Sync",
-	"version": "1.3.3",
+	"version": "1.3.4",
 	"minAppVersion": "1.4.4",
 	"description": "Sync markdown files between Obsidian and Yuque",
 	"author": "weepwood",
