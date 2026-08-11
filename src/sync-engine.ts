@@ -195,6 +195,10 @@ export class SyncEngine {
 		this.schedulePersist();
 	}
 
+	isScanning(): boolean {
+		return this.scanning;
+	}
+
 	cancelScan(): boolean {
 		if (!this.scanning) {
 			return false;

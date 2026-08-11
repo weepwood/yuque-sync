@@ -1,7 +1,8 @@
 import { App, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { SyncSettingsPanel, type SyncSettingsHost } from './sync-settings-panel';
 import { DEFAULT_SETTINGS, type YuqueSyncSettings } from './types';
 
-export interface SettingsHost {
+export interface SettingsHost extends SyncSettingsHost {
 	pluginSettings: YuqueSyncSettings;
 	saveSettings(): Promise<void>;
 }
@@ -12,6 +13,7 @@ const HOUR_MS = 60 * MINUTE_MS;
 
 export class YuqueSyncSettingTab extends PluginSettingTab {
 	private saveTimer: number | null = null;
+	private syncPanel: SyncSettingsPanel | null = null;
 
 	constructor(app: App, private readonly host: Plugin & SettingsHost) {
 		super(app, host);
@@ -19,6 +21,8 @@ export class YuqueSyncSettingTab extends PluginSettingTab {
 
 	display(): void {
 		const { containerEl } = this;
+		this.syncPanel?.dispose();
+		this.syncPanel = null;
 		containerEl.empty();
 		containerEl.addClass('yuque-sync-settings');
 
@@ -84,6 +88,9 @@ export class YuqueSyncSettingTab extends PluginSettingTab {
 				text.inputEl.addClass('yuque-sync-secret-input');
 				text.inputEl.autocomplete = 'off';
 			});
+
+		this.syncPanel = new SyncSettingsPanel(this.app, this.host, () => this.display());
+		this.syncPanel.render(containerEl);
 
 		this.renderRateLimitSettings(containerEl);
 
@@ -156,6 +163,8 @@ export class YuqueSyncSettingTab extends PluginSettingTab {
 	}
 
 	hide(): void {
+		this.syncPanel?.dispose();
+		this.syncPanel = null;
 		if (this.saveTimer !== null) {
 			window.clearTimeout(this.saveTimer);
 			this.saveTimer = null;

@@ -52,6 +52,7 @@ export interface YuqueSyncSettings {
 	syncIndex: Record<string, SyncIndexEntry>;
 	dirtyFiles: string[];
 	scanSession: ScanSession | null;
+	lastScanSummary: ScanSummary | null;
 	remoteCheckTtlHours: number;
 	remoteFallbackBudget: number;
 	scanConcurrency: number;
@@ -71,6 +72,7 @@ export const DEFAULT_SETTINGS: YuqueSyncSettings = {
 	syncIndex: {},
 	dirtyFiles: [],
 	scanSession: null,
+	lastScanSummary: null,
 	remoteCheckTtlHours: 24,
 	remoteFallbackBudget: 200,
 	scanConcurrency: 4,
