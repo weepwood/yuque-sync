@@ -72,6 +72,9 @@ export default class YuqueSyncPlugin extends Plugin {
 		this.client = new YuqueClient(
 			() => this.pluginSettings.yuqueToken,
 			() => this.pluginSettings.yuqueCookie,
+			() => this.pluginSettings,
+			() => this.saveSettings(),
+			(text) => this.setStatus(text),
 		);
 		this.syncEngine = new SyncEngine(
 			this.app,
@@ -158,6 +161,7 @@ export default class YuqueSyncPlugin extends Plugin {
 			window.clearTimeout(this.statusTimer);
 		}
 		void this.syncEngine?.flush();
+		void this.client?.flushRateLimiter();
 	}
 
 	async loadSettings(): Promise<void> {
@@ -174,6 +178,12 @@ export default class YuqueSyncPlugin extends Plugin {
 			remoteCheckTtlHours: saved?.remoteCheckTtlHours ?? DEFAULT_SETTINGS.remoteCheckTtlHours,
 			remoteFallbackBudget: saved?.remoteFallbackBudget ?? DEFAULT_SETTINGS.remoteFallbackBudget,
 			scanConcurrency: saved?.scanConcurrency ?? DEFAULT_SETTINGS.scanConcurrency,
+			apiRatePerSecond: saved?.apiRatePerSecond ?? DEFAULT_SETTINGS.apiRatePerSecond,
+			apiRatePerMinute: saved?.apiRatePerMinute ?? DEFAULT_SETTINGS.apiRatePerMinute,
+			apiRatePerHour: saved?.apiRatePerHour ?? DEFAULT_SETTINGS.apiRatePerHour,
+			apiRequestHistory: saved?.apiRequestHistory ?? [],
+			apiPausedUntil: saved?.apiPausedUntil ?? 0,
+			apiLast429At: saved?.apiLast429At ?? null,
 		};
 	}
 
