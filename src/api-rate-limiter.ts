@@ -126,19 +126,8 @@ export class YuqueApiRateLimiter {
 		});
 	}
 
-	observeRateLimit(error: unknown): boolean {
-		if (getHttpStatus(error) !== 429) {
-			return false;
-		}
-		const now = Date.now();
-		const settings = this.getSettings();
-		const retryAfterMs = parseRetryAfterMs(error, now) ?? DEFAULT_RATE_LIMIT_PAUSE_MS;
-		settings.apiPausedUntil = Math.max(settings.apiPausedUntil, now + retryAfterMs);
-		settings.apiLast429At = now;
-		this.setStatus(`语雀 API 已限流，队列暂停至 ${new Date(settings.apiPausedUntil).toLocaleTimeString()}`);
-		this.schedulePersist();
-		this.scheduleWake(settings.apiPausedUntil - now);
-		return true;
+	isRateLimitError(error: unknown): boolean {
+		return getHttpStatus(error) === 429;
 	}
 
 	getSnapshot(): ApiRateLimitSnapshot {
@@ -190,12 +179,28 @@ export class YuqueApiRateLimiter {
 			this.recordDispatch(currentNow);
 			this.active += 1;
 			void request.operation()
-				.then(request.resolve, request.reject)
+				.then(request.resolve, (error: unknown) => {
+					if (this.isRateLimitError(error)) {
+						this.pauseForRateLimit(error);
+					}
+					request.reject(error);
+				})
 				.finally(() => {
 					this.active -= 1;
 					this.pump();
 				});
 		}
+	}
+
+	private pauseForRateLimit(error: unknown): void {
+		const now = Date.now();
+		const settings = this.getSettings();
+		const retryAfterMs = parseRetryAfterMs(error, now) ?? DEFAULT_RATE_LIMIT_PAUSE_MS;
+		settings.apiPausedUntil = Math.max(settings.apiPausedUntil, now + retryAfterMs);
+		settings.apiLast429At = now;
+		this.setStatus(`语雀 API 已限流，队列暂停至 ${new Date(settings.apiPausedUntil).toLocaleTimeString()}`);
+		this.schedulePersist();
+		this.scheduleWake(settings.apiPausedUntil - now);
 	}
 
 	private getWaitMs(now: number): number {
