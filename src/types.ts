@@ -55,6 +55,12 @@ export interface YuqueSyncSettings {
 	remoteCheckTtlHours: number;
 	remoteFallbackBudget: number;
 	scanConcurrency: number;
+	apiRatePerSecond: number;
+	apiRatePerMinute: number;
+	apiRatePerHour: number;
+	apiRequestHistory: number[];
+	apiPausedUntil: number;
+	apiLast429At: number | null;
 }
 
 export const DEFAULT_SETTINGS: YuqueSyncSettings = {
@@ -68,6 +74,14 @@ export const DEFAULT_SETTINGS: YuqueSyncSettings = {
 	remoteCheckTtlHours: 24,
 	remoteFallbackBudget: 200,
 	scanConcurrency: 4,
+	// 这是插件侧的保守默认值，不声明为语雀官方硬上限。
+	// 用户可按语雀 OpenAPI 页面公布的当前额度调整。
+	apiRatePerSecond: 2,
+	apiRatePerMinute: 50,
+	apiRatePerHour: 4000,
+	apiRequestHistory: [],
+	apiPausedUntil: 0,
+	apiLast429At: null,
 };
 
 export interface YuqueLocation {
