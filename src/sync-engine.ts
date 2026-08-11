@@ -59,7 +59,8 @@ function getHttpStatus(error: unknown): number | null {
 
 function isRetryable(error: unknown): boolean {
 	const status = getHttpStatus(error);
-	return status === 429 || (status !== null && status >= 500 && status <= 599);
+	// HTTP 429 由 YuqueClient 的全局限流队列统一处理，避免 worker 重复退避。
+	return status !== null && status >= 500 && status <= 599;
 }
 
 function sleep(milliseconds: number): Promise<void> {
@@ -192,6 +193,10 @@ export class SyncEngine {
 				.filter((item) => item !== path);
 		}
 		this.schedulePersist();
+	}
+
+	isScanning(): boolean {
+		return this.scanning;
 	}
 
 	cancelScan(): boolean {
@@ -622,7 +627,7 @@ export class SyncEngine {
 		}
 
 		try {
-			const remote = await withRetry(() => this.client.getDocument(location.bookId, location.slug));
+			const remote = await withRetry(() => this.client.getDocument(location.bookId, location.slug, 'low'));
 			const remoteHash = await hashMarkdownBody(remote.content);
 			const classification = classifyHashes(localHash, remoteHash, previousForLink?.lastSyncedHash);
 			return {

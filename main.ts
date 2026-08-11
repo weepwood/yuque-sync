@@ -25,7 +25,6 @@ import {
 } from './src/markdown-utils';
 import { YuqueSyncSettingTab } from './src/settings-tab';
 import { SyncEngine } from './src/sync-engine';
-import { SyncStatusModal } from './src/sync-status-modal';
 import {
 	DEFAULT_SETTINGS,
 	type ImageReference,
@@ -72,6 +71,9 @@ export default class YuqueSyncPlugin extends Plugin {
 		this.client = new YuqueClient(
 			() => this.pluginSettings.yuqueToken,
 			() => this.pluginSettings.yuqueCookie,
+			() => this.pluginSettings,
+			() => this.saveSettings(),
+			(text) => this.setStatus(text),
 		);
 		this.syncEngine = new SyncEngine(
 			this.app,
@@ -158,6 +160,7 @@ export default class YuqueSyncPlugin extends Plugin {
 			window.clearTimeout(this.statusTimer);
 		}
 		void this.syncEngine?.flush();
+		void this.client?.flushRateLimiter();
 	}
 
 	async loadSettings(): Promise<void> {
@@ -171,14 +174,40 @@ export default class YuqueSyncPlugin extends Plugin {
 			syncIndex: saved?.syncIndex ?? {},
 			dirtyFiles: saved?.dirtyFiles ?? [],
 			scanSession: saved?.scanSession ?? null,
+			lastScanSummary: saved?.lastScanSummary ?? null,
 			remoteCheckTtlHours: saved?.remoteCheckTtlHours ?? DEFAULT_SETTINGS.remoteCheckTtlHours,
 			remoteFallbackBudget: saved?.remoteFallbackBudget ?? DEFAULT_SETTINGS.remoteFallbackBudget,
 			scanConcurrency: saved?.scanConcurrency ?? DEFAULT_SETTINGS.scanConcurrency,
+			apiRatePerSecond: saved?.apiRatePerSecond ?? DEFAULT_SETTINGS.apiRatePerSecond,
+			apiRatePerMinute: saved?.apiRatePerMinute ?? DEFAULT_SETTINGS.apiRatePerMinute,
+			apiRatePerHour: saved?.apiRatePerHour ?? DEFAULT_SETTINGS.apiRatePerHour,
+			apiRequestHistory: saved?.apiRequestHistory ?? [],
+			apiPausedUntil: saved?.apiPausedUntil ?? 0,
+			apiLast429At: saved?.apiLast429At ?? null,
 		};
 	}
 
 	async saveSettings(): Promise<void> {
 		await this.saveData(this.pluginSettings);
+	}
+
+	async runSettingsScan(mode: ScanMode): Promise<void> {
+		await this.runExclusive(
+			mode === 'full' ? '正在完整检测同步状态' : '正在增量检测同步状态',
+			() => this.scanDocumentsAndShow(mode),
+		);
+	}
+
+	async runSettingsPushUnlinked(): Promise<void> {
+		await this.runExclusive('正在批量推送文档', () => this.pushUnlinkedDocuments());
+	}
+
+	cancelSettingsScan(): boolean {
+		return this.syncEngine.cancelScan();
+	}
+
+	isSettingsScanRunning(): boolean {
+		return this.syncEngine.isScanning();
 	}
 
 	private async runExclusive(label: string, operation: () => Promise<void>): Promise<void> {
@@ -281,26 +310,16 @@ export default class YuqueSyncPlugin extends Plugin {
 				'执行完整同步检测？',
 				`将深度校验 ${total} 篇 Markdown。完整检测会下载所有已关联语雀文档正文；任务支持暂停和断点继续。`,
 			);
-			if (!confirmed) {
-				return;
-			}
+			if (!confirmed) return;
 		}
 
 		const report = await this.syncEngine.scan(mode);
-		new SyncStatusModal(
-			this.app,
-			report.results,
-			report.summary,
-			(nextMode) => this.runExclusive(
-				nextMode === 'full' ? '正在完整检测同步状态' : '正在增量检测同步状态',
-				() => this.scanDocumentsAndShow(nextMode),
-			),
-			() => this.runExclusive('正在批量推送文档', () => this.pushUnlinkedDocuments()),
-		).open();
+		this.pluginSettings.lastScanSummary = report.summary;
+		await this.saveSettings();
 
 		const message = report.summary.canceled
-			? `检测已暂停：本次处理 ${report.summary.scanned} 篇，进度已保存`
-			: `检测完成：实际处理 ${report.summary.scanned} 篇，复用缓存 ${report.summary.cached} 篇，远端正文请求 ${report.summary.remoteBodyRequests} 次`;
+			? `检测已暂停：本次处理 ${report.summary.scanned} 篇，进度已保存，可在设置 → Yuque Sync 查看`
+			: `检测完成：实际处理 ${report.summary.scanned} 篇，复用缓存 ${report.summary.cached} 篇，远端正文请求 ${report.summary.remoteBodyRequests} 次；结果已更新到设置页`;
 		new Notice(message);
 		this.setStatus(message, 5000);
 	}

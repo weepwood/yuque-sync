@@ -157,7 +157,7 @@
 	font-variant-numeric: tabular-nums;
 }
 
-/* Scan modal */
+/* Sync status panel */
 
 .yuque-sync-scan-modal {
 	width: min(94vw, 1120px);
@@ -597,4 +597,21 @@
 	.yuque-sync-result-detail {
 		max-width: 62vw;
 	}
+}
+
+.yuque-sync-settings-scan-metrics {
+	margin-top: var(--size-4-3);
+}
+
+.yuque-sync-settings-actions {
+	margin-bottom: var(--size-4-3);
+}
+
+.yuque-sync-settings-table-wrap {
+	max-height: min(52vh, 620px);
+	margin-bottom: var(--size-4-5);
+}
+
+.yuque-sync-control-busy {
+	border-left: 3px solid var(--interactive-accent);
 }
