@@ -1,0 +1,340 @@
+name: Implement sync safety temporary
+
+on:
+  push:
+    branches: [feat/sync-safety-cancel-tests]
+    paths:
+      - .github/workflows/implement-sync-safety-temporary.yml
+
+permissions:
+  contents: write
+
+jobs:
+  implement:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feat/sync-safety-cancel-tests
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - name: Apply safety and cancellation changes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          def replace(path, old, new, count=1):
+              p = Path(path)
+              s = p.read_text()
+              if old not in s:
+                  raise SystemExit(f'target not found in {path}: {old[:100]!r}')
+              p.write_text(s.replace(old, new, count))
+
+          # sync-engine: reuse pure classifier and add cancellation-aware scan requests.
+          p = Path('src/sync-engine.ts')
+          s = p.read_text()
+          s = s.replace("} from './markdown-utils';\n", "} from './markdown-utils';\nimport { classifySyncHashes } from './sync-classifier';\n", 1)
+          s = re.sub(r"\nfunction classifyHashes\([\s\S]*?\n}\n\nfunction statusDetail", "\nfunction statusDetail", s, count=1)
+          s = s.replace(
+              "function isRetryable(error: unknown): boolean {\n\tconst status = getHttpStatus(error);\n\t// HTTP 429 由 YuqueClient 的全局限流队列统一处理，避免 worker 重复退避。\n\treturn status !== null && status >= 500 && status <= 599;\n}\n",
+              "function isRetryable(error: unknown): boolean {\n\tconst status = getHttpStatus(error);\n\t// HTTP 429 由 YuqueClient 的全局限流队列统一处理，避免 worker 重复退避。\n\treturn status !== null && status >= 500 && status <= 599;\n}\n\nfunction isAbortError(error: unknown): boolean {\n\treturn error instanceof Error && error.name === 'AbortError';\n}\n",
+              1,
+          )
+          s = s.replace(
+              "interface LocalSnapshot {\n\tcontent: string;\n\tmtime: number;\n\tsize: number;\n}\n",
+              "interface LocalSnapshot {\n\tcontent: string;\n\tmtime: number;\n\tsize: number;\n}\n\nexport interface UploadPreparation {\n\tcontent: string;\n\tstatus: SyncStatus;\n\tremoteHash: string;\n\tremoteUpdatedAt: string;\n\tdetail?: string;\n}\n",
+              1,
+          )
+          s = s.replace(
+              "\tprivate scanning = false;\n\tprivate cancelRequested = false;\n",
+              "\tprivate scanning = false;\n\tprivate cancelRequested = false;\n\tprivate scanAbortController: AbortController | null = null;\n",
+              1,
+          )
+          s = s.replace(
+              "\tcancelScan(): boolean {\n\t\tif (!this.scanning) {\n\t\t\treturn false;\n\t\t}\n\t\tthis.cancelRequested = true;\n\t\treturn true;\n\t}\n\n\tasync flush(): Promise<void> {",
+              "\tcancelScan(): boolean {\n\t\tif (!this.scanning) {\n\t\t\treturn false;\n\t\t}\n\t\tthis.cancelRequested = true;\n\t\tthis.scanAbortController?.abort();\n\t\treturn true;\n\t}\n\n\tdispose(): void {\n\t\tthis.cancelRequested = true;\n\t\tthis.scanAbortController?.abort();\n\t\tthis.scanAbortController = null;\n\t\tif (this.saveTimer !== null) {\n\t\t\tglobalThis.clearTimeout(this.saveTimer);\n\t\t\tthis.saveTimer = null;\n\t\t}\n\t}\n\n\tasync flush(): Promise<void> {",
+              1,
+          )
+          s = s.replace(
+              "\tasync scan(mode: ScanMode): Promise<SyncScanReport> {\n\t\tconst startedAt = Date.now();\n\t\tthis.cancelRequested = false;\n\t\tthis.scanning = true;\n\n\t\ttry {",
+              "\tasync scan(mode: ScanMode): Promise<SyncScanReport> {\n\t\tconst startedAt = Date.now();\n\t\tthis.cancelRequested = false;\n\t\tthis.scanning = true;\n\t\tconst scanAbortController = new AbortController();\n\t\tthis.scanAbortController = scanAbortController;\n\t\tconst { signal } = scanAbortController;\n\n\t\ttry {",
+              1,
+          )
+          s = s.replace("\t\t\t\t\t: await this.buildIncrementalPlan(files);", "\t\t\t\t\t: await this.buildIncrementalPlan(files, signal);", 1)
+          s = s.replace(
+              "const result = await this.scanFile(file, mode, mode === 'full' || plan.remoteRequired.has(path));",
+              "const result = await this.scanFile(file, mode, mode === 'full' || plan.remoteRequired.has(path), signal);",
+              1,
+          )
+          s = s.replace(
+              "\t\t\t\t\t} catch (error) {\n\t\t\t\t\t\tsettings.syncIndex[path] = {",
+              "\t\t\t\t\t} catch (error) {\n\t\t\t\t\t\tif (isAbortError(error)) {\n\t\t\t\t\t\t\tthis.dirtyPaths.add(path);\n\t\t\t\t\t\t\treturn;\n\t\t\t\t\t\t}\n\t\t\t\t\t\tsettings.syncIndex[path] = {",
+              1,
+          )
+          s = s.replace(
+              "\t\t} finally {\n\t\t\tthis.scanning = false;\n\t\t\tthis.cancelRequested = false;\n\t\t\tthis.schedulePersist();\n\t\t}\n\t}\n",
+              "\t\t} finally {\n\t\t\tif (this.scanAbortController === scanAbortController) {\n\t\t\t\tthis.scanAbortController = null;\n\t\t\t}\n\t\t\tthis.scanning = false;\n\t\t\tthis.cancelRequested = false;\n\t\t\tthis.schedulePersist();\n\t\t}\n\t}\n",
+              1,
+          )
+          s = s.replace("classification = classifyHashes(", "classification = classifySyncHashes(")
+          s = s.replace(
+              "\tprivate async buildIncrementalPlan(files: TFile[]): Promise<ScanPlan> {",
+              "\tprivate async buildIncrementalPlan(files: TFile[], signal: AbortSignal): Promise<ScanPlan> {",
+              1,
+          )
+          s = s.replace(
+              "\t\tconst remoteRefresh = await this.refreshRemoteCandidates(files, planned);",
+              "\t\tconst remoteRefresh = await this.refreshRemoteCandidates(files, planned, signal);",
+              1,
+          )
+          s = s.replace(
+              "\tprivate async refreshRemoteCandidates(\n\t\tfiles: TFile[],\n\t\talreadyPlanned: ReadonlyMap<string, boolean>,\n\t): Promise<{ remoteRequired: Set<string>; metadataHits: number }> {",
+              "\tprivate async refreshRemoteCandidates(\n\t\tfiles: TFile[],\n\t\talreadyPlanned: ReadonlyMap<string, boolean>,\n\t\tsignal: AbortSignal,\n\t): Promise<{ remoteRequired: Set<string>; metadataHits: number }> {",
+              1,
+          )
+          s = s.replace(
+              "const documents = await withRetry(() => this.client.listDocuments(bookId));",
+              "const documents = await withRetry(() => this.client.listDocuments(bookId, 'low', signal));",
+              1,
+          )
+          s = s.replace(
+              "\t\t\t\t} catch (error) {\n\t\t\t\t\tconsole.warn(`[Yuque Sync] 无法批量读取语雀知识库元数据，改用预算降级：${bookId}`, error);",
+              "\t\t\t\t} catch (error) {\n\t\t\t\t\tif (isAbortError(error)) throw error;\n\t\t\t\t\tconsole.warn(`[Yuque Sync] 无法批量读取语雀知识库元数据，改用预算降级：${bookId}`, error);",
+              1,
+          )
+          s = s.replace(
+              "\tprivate async scanFile(file: TFile, mode: ScanMode, remoteRequired: boolean): Promise<ScanFileResult> {",
+              "\tprivate async scanFile(\n\t\tfile: TFile,\n\t\tmode: ScanMode,\n\t\tremoteRequired: boolean,\n\t\tsignal: AbortSignal,\n\t): Promise<ScanFileResult> {",
+              1,
+          )
+          s = s.replace(
+              "this.client.getDocument(location.bookId, location.slug, 'low')",
+              "this.client.getDocument(location.bookId, location.slug, 'low', signal)",
+              1,
+          )
+          s = s.replace(
+              "\t\t} catch (error) {\n\t\t\tconst status: SyncStatus = getHttpStatus(error) === 404 ? 'remote-missing' : 'error';",
+              "\t\t} catch (error) {\n\t\t\tif (isAbortError(error)) throw error;\n\t\t\tconst status: SyncStatus = getHttpStatus(error) === 404 ? 'remote-missing' : 'error';",
+              1,
+          )
+
+          marker = "\tasync recordSynchronized(\n"
+          if marker not in s:
+              raise SystemExit('recordSynchronized marker missing')
+          prepare_method = '''\tasync prepareUpload(file: TFile, yuqueLink: string): Promise<UploadPreparation> {\n\t\tconst location = extractYuqueLocation(yuqueLink);\n\t\tif (!location) {\n\t\t\tthrow new Error('yuque_link 不是有效的语雀文档地址');\n\t\t}\n\t\tconst snapshot = await this.readStableSnapshot(file);\n\t\tconst frontmatter = readFrontmatter(snapshot.content);\n\t\tif (isYuqueSyncDisabled(frontmatter)) {\n\t\t\tthrow new Error('当前文件设置了 yuque_sync: false，已禁止语雀同步');\n\t\t}\n\t\tif (getStringProperty(frontmatter, 'yuque_link') !== yuqueLink) {\n\t\t\tthrow new Error('上传检查期间 yuque_link 已发生变化，请重新执行上传');\n\t\t}\n\n\t\tconst remote = await this.client.getDocument(location.bookId, location.slug, 'high');\n\t\tif (file.stat.mtime !== snapshot.mtime || file.stat.size !== snapshot.size) {\n\t\t\tthis.dirtyPaths.add(file.path);\n\t\t\tthrow new Error('上传检查期间本地文档已发生变化，请重新执行上传');\n\t\t}\n\t\tconst localHash = await hashMarkdownBody(snapshot.content);\n\t\tconst remoteHash = await hashMarkdownBody(remote.content);\n\t\tconst previous = this.getSettings().syncIndex[file.path];\n\t\tconst previousForLink = previous?.yuqueLink === yuqueLink ? previous : undefined;\n\t\tconst classification = classifySyncHashes(localHash, remoteHash, previousForLink?.lastSyncedHash);\n\t\tconst now = Date.now();\n\t\tthis.getSettings().syncIndex[file.path] = {\n\t\t\tpath: file.path,\n\t\t\tmtime: snapshot.mtime,\n\t\t\tsize: snapshot.size,\n\t\t\tstatus: classification.status,\n\t\t\tyuqueLink,\n\t\t\tlocalHash,\n\t\t\tremoteHash,\n\t\t\tlastSyncedHash: classification.baseline,\n\t\t\tremoteUpdatedAt: remote.updatedAt || undefined,\n\t\t\tremoteCheckedAt: now,\n\t\t\tlastCheckedAt: now,\n\t\t\tdetail: statusDetail(classification.status),\n\t\t};\n\t\tthis.reconcileDirtyPath(file, snapshot);\n\t\tawait this.persistNow();\n\t\treturn {\n\t\t\tcontent: snapshot.content,\n\t\t\tstatus: classification.status,\n\t\t\tremoteHash,\n\t\t\tremoteUpdatedAt: remote.updatedAt,\n\t\t\tdetail: statusDetail(classification.status),\n\t\t};\n\t}\n\n'''
+          s = s.replace(marker, prepare_method + marker, 1)
+          p.write_text(s)
+
+          # API limiter: queued requests become abortable and dispose clears timers/queue.
+          p = Path('src/api-rate-limiter.ts')
+          s = p.read_text()
+          s = s.replace(
+              "\treject: (reason: unknown) => void;\n}",
+              "\treject: (reason: unknown) => void;\n\tsignal?: AbortSignal;\n\tabortListener?: () => void;\n}",
+              1,
+          )
+          s = s.replace(
+              "function normalizeLimit(value: number, fallback: number): number {",
+              "function createAbortError(): Error {\n\tconst error = new Error('操作已取消');\n\terror.name = 'AbortError';\n\treturn error;\n}\n\nfunction normalizeLimit(value: number, fallback: number): number {",
+              1,
+          )
+          s = s.replace(
+              "\tprivate persistTimer: number | null = null;\n",
+              "\tprivate persistTimer: number | null = null;\n\tprivate disposed = false;\n",
+              1,
+          )
+          old_schedule = """\tschedule<T>(operation: () => Promise<T>, priority: ApiRequestPriority = 'normal'): Promise<T> {\n\t\treturn new Promise<T>((resolve, reject) => {\n\t\t\tthis.queue.push({\n\t\t\t\tpriority: PRIORITY_WEIGHT[priority],\n\t\t\t\tsequence: this.sequence,\n\t\t\t\toperation,\n\t\t\t\tresolve: (value) => resolve(value as T),\n\t\t\t\treject,\n\t\t\t});\n\t\t\tthis.sequence += 1;\n\t\t\tthis.queue.sort((left, right) => left.priority - right.priority || left.sequence - right.sequence);\n\t\t\tthis.pump();\n\t\t});\n\t}\n"""
+          new_schedule = """\tschedule<T>(\n\t\toperation: () => Promise<T>,\n\t\tpriority: ApiRequestPriority = 'normal',\n\t\tsignal?: AbortSignal,\n\t): Promise<T> {\n\t\tif (this.disposed || signal?.aborted) {\n\t\t\treturn Promise.reject(createAbortError());\n\t\t}\n\t\treturn new Promise<T>((resolve, reject) => {\n\t\t\tlet request: QueuedRequest;\n\t\t\tconst abortListener = () => {\n\t\t\t\tconst index = this.queue.indexOf(request);\n\t\t\t\tif (index >= 0) {\n\t\t\t\t\tthis.queue.splice(index, 1);\n\t\t\t\t\treject(createAbortError());\n\t\t\t\t}\n\t\t\t};\n\t\t\trequest = {\n\t\t\t\tpriority: PRIORITY_WEIGHT[priority],\n\t\t\t\tsequence: this.sequence,\n\t\t\t\toperation,\n\t\t\t\tresolve: (value) => resolve(value as T),\n\t\t\t\treject,\n\t\t\t\tsignal,\n\t\t\t\tabortListener,\n\t\t\t};\n\t\t\tsignal?.addEventListener('abort', abortListener, { once: true });\n\t\t\tthis.queue.push(request);\n\t\t\tthis.sequence += 1;\n\t\t\tthis.queue.sort((left, right) => left.priority - right.priority || left.sequence - right.sequence);\n\t\t\tthis.pump();\n\t\t});\n\t}\n"""
+          if old_schedule not in s:
+              raise SystemExit('rate limiter schedule block missing')
+          s = s.replace(old_schedule, new_schedule, 1)
+          s = s.replace(
+              "\tasync flush(): Promise<void> {\n\t\tif (this.persistTimer !== null) {\n\t\t\twindow.clearTimeout(this.persistTimer);",
+              "\tdispose(): void {\n\t\tthis.disposed = true;\n\t\tif (this.wakeTimer !== null) {\n\t\t\tglobalThis.clearTimeout(this.wakeTimer);\n\t\t\tthis.wakeTimer = null;\n\t\t\tthis.wakeAt = 0;\n\t\t}\n\t\tif (this.persistTimer !== null) {\n\t\t\tglobalThis.clearTimeout(this.persistTimer);\n\t\t\tthis.persistTimer = null;\n\t\t}\n\t\tfor (const request of this.queue.splice(0)) {\n\t\t\trequest.signal?.removeEventListener('abort', request.abortListener ?? (() => undefined));\n\t\t\trequest.reject(createAbortError());\n\t\t}\n\t}\n\n\tasync flush(): Promise<void> {\n\t\tif (this.persistTimer !== null) {\n\t\t\tglobalThis.clearTimeout(this.persistTimer);",
+              1,
+          )
+          s = s.replace(
+              "\tprivate pump(): void {\n\t\tif (this.queue.length === 0 || this.active >= MAX_ACTIVE_REQUESTS) {",
+              "\tprivate pump(): void {\n\t\tif (this.disposed || this.queue.length === 0 || this.active >= MAX_ACTIVE_REQUESTS) {",
+              1,
+          )
+          s = s.replace(
+              "\t\t\tconst request = this.queue.shift();\n\t\t\tif (!request) {\n\t\t\t\treturn;\n\t\t\t}\n\t\t\tthis.recordDispatch(currentNow);",
+              "\t\t\tconst request = this.queue.shift();\n\t\t\tif (!request) {\n\t\t\t\treturn;\n\t\t\t}\n\t\t\trequest.signal?.removeEventListener('abort', request.abortListener ?? (() => undefined));\n\t\t\tif (request.signal?.aborted) {\n\t\t\t\trequest.reject(createAbortError());\n\t\t\t\tcontinue;\n\t\t\t}\n\t\t\tthis.recordDispatch(currentNow);",
+              1,
+          )
+          s = s.replace('window.clearTimeout(this.wakeTimer);', 'globalThis.clearTimeout(this.wakeTimer);')
+          s = s.replace('window.setTimeout(() => {', 'globalThis.setTimeout(() => {')
+          s = s.replace('window.clearTimeout(this.persistTimer);', 'globalThis.clearTimeout(this.persistTimer);')
+          p.write_text(s)
+
+          # Yuque client: thread AbortSignal into queued GET/list requests and expose dispose.
+          p = Path('src/yuque-client.ts')
+          s = p.read_text()
+          s = s.replace(
+              "\t\tpriority: ApiRequestPriority = 'high',\n\t): Promise<YuqueDocument> {",
+              "\t\tpriority: ApiRequestPriority = 'high',\n\t\tsignal?: AbortSignal,\n\t): Promise<YuqueDocument> {",
+              1,
+          )
+          s = s.replace("\t\t}), priority);", "\t\t}), priority, signal);", 1)
+          s = s.replace(
+              "\t\tpriority: ApiRequestPriority = 'low',\n\t): Promise<RemoteYuqueDocumentMeta[]> {",
+              "\t\tpriority: ApiRequestPriority = 'low',\n\t\tsignal?: AbortSignal,\n\t): Promise<RemoteYuqueDocumentMeta[]> {",
+              1,
+          )
+          # listDocuments contains another priority call after getDocument's first replacement.
+          list_anchor = "\t\t\t}), priority);"
+          if list_anchor not in s:
+              raise SystemExit('listDocuments request anchor missing')
+          s = s.replace(list_anchor, "\t\t\t}), priority, signal);", 1)
+          s = s.replace(
+              "\tasync flushRateLimiter(): Promise<void> {\n\t\tawait this.rateLimiter.flush();\n\t}\n",
+              "\tdispose(): void {\n\t\tthis.rateLimiter.dispose();\n\t}\n\n\tasync flushRateLimiter(): Promise<void> {\n\t\tawait this.rateLimiter.flush();\n\t}\n",
+              1,
+          )
+          s = s.replace(
+              "\tprivate async requestOpenApi<T>(\n\t\toperation: () => Promise<T>,\n\t\tpriority: ApiRequestPriority,\n\t): Promise<T> {",
+              "\tprivate async requestOpenApi<T>(\n\t\toperation: () => Promise<T>,\n\t\tpriority: ApiRequestPriority,\n\t\tsignal?: AbortSignal,\n\t): Promise<T> {",
+              1,
+          )
+          s = s.replace("return await this.rateLimiter.schedule(operation, priority);", "return await this.rateLimiter.schedule(operation, priority, signal);", 1)
+          p.write_text(s)
+
+          # main: distinguish cancellation from errors, dispose request queues, and preflight linked uploads.
+          p = Path('main.ts')
+          s = p.read_text()
+          s = s.replace("\ttype ScanMode,\n", "\ttype ScanMode,\n\ttype SyncStatus,\n", 1)
+          s = s.replace(
+              "\t\tvoid this.syncEngine?.flush();\n\t\tvoid this.client?.flushRateLimiter();",
+              "\t\tthis.syncEngine?.dispose();\n\t\tthis.client?.dispose();\n\t\tvoid this.syncEngine?.flush();\n\t\tvoid this.client?.flushRateLimiter();",
+              1,
+          )
+          s = s.replace(
+              "\t\t} catch (error) {\n\t\t\tconsole.error('[Yuque Sync] 操作失败', error);",
+              "\t\t} catch (error) {\n\t\t\tif (error instanceof Error && error.name === 'AbortError') {\n\t\t\t\tnew Notice('语雀同步任务已暂停');\n\t\t\t\tthis.setStatus('同步任务已暂停', 3000);\n\t\t\t\treturn;\n\t\t\t}\n\t\t\tconsole.error('[Yuque Sync] 操作失败', error);",
+              1,
+          )
+          old = '''\t\tif (yuqueLink) {\n\t\t\tconst location = extractYuqueLocation(yuqueLink);\n\t\t\tif (!location) {\n\t\t\t\tthrow new Error('yuque_link 不是有效的语雀文档地址');\n\t\t\t}\n\t\t\tconst confirmed = await ConfirmModal.show(\n\t\t\t\tthis.app,\n\t\t\t\t'上传到语雀？',\n\t\t\t\t`将使用本地内容覆盖语雀文档：${file.basename}`,\n\t\t\t);\n\t\t\tif (!confirmed) {\n\t\t\t\treturn;\n\t\t\t}\n\n\t\t\tconst latestContent = await this.app.vault.read(file);\n\t\t\tconst latestLink = getStringProperty(readFrontmatter(latestContent), 'yuque_link');\n\t\t\tif (latestLink !== yuqueLink) {\n\t\t\t\tthrow new Error('确认期间 yuque_link 已发生变化，请重新执行上传');\n\t\t\t}\n\t\t\tconst updatedAt = await this.client.updateDocument(\n\t\t\t\tlocation.bookId,\n\t\t\t\tlocation.slug,\n\t\t\t\tfile.basename,\n\t\t\t\tsplitMarkdown(latestContent).body,\n\t\t\t);\n\t\t\tawait this.syncEngine.recordSynchronized(file, yuqueLink, latestContent, updatedAt);\n\t\t\tnew Notice('文档已上传到语雀');\n\t\t\tthis.setStatus('文档上传完成', 3000);\n\t\t\treturn;\n\t\t}\n'''
+          new = '''\t\tif (yuqueLink) {\n\t\t\tconst location = extractYuqueLocation(yuqueLink);\n\t\t\tif (!location) {\n\t\t\t\tthrow new Error('yuque_link 不是有效的语雀文档地址');\n\t\t\t}\n\n\t\t\tconst firstCheck = await this.syncEngine.prepareUpload(file, yuqueLink);\n\t\t\tconst riskyStatuses = new Set<SyncStatus>(['remote-changed', 'conflict', 'different']);\n\t\t\tconst risky = riskyStatuses.has(firstCheck.status);\n\t\t\tconst descriptions: Partial<Record<SyncStatus, string>> = {\n\t\t\t\t'remote-changed': '语雀正文已相对最近同步基线发生变化，而本地正文没有对应修改。强制上传会丢失语雀端修改。',\n\t\t\t\tconflict: '本地与语雀正文都已相对最近同步基线发生变化。强制上传会丢失语雀端修改。',\n\t\t\t\tdifferent: '两端正文不同，但尚未建立可靠的最近同步基线，无法自动判断正确同步方向。',\n\t\t\t\t'local-changed': '仅检测到本地正文变化，可以上传到语雀。',\n\t\t\t\tsynced: '当前本地与语雀正文一致。继续上传会刷新语雀标题与更新时间。',\n\t\t\t};\n\t\t\tconst confirmed = await ConfirmModal.show(\n\t\t\t\tthis.app,\n\t\t\t\trisky ? '检测到远端修改，仍要强制覆盖？' : '上传到语雀？',\n\t\t\t\t`${descriptions[firstCheck.status] ?? firstCheck.detail ?? '已完成上传前同步状态检查'}\\n文档：${file.basename}`,\n\t\t\t);\n\t\t\tif (!confirmed) return;\n\n\t\t\t// 确认窗口停留期间远端可能再次变化，因此写入前再做一次短检查。\n\t\t\tconst finalCheck = await this.syncEngine.prepareUpload(file, yuqueLink);\n\t\t\tif (finalCheck.remoteHash !== firstCheck.remoteHash) {\n\t\t\t\tthrow new Error('确认期间语雀文档又发生了变化，为避免覆盖新内容，本次上传已取消');\n\t\t\t}\n\t\t\tconst updatedAt = await this.client.updateDocument(\n\t\t\t\tlocation.bookId,\n\t\t\t\tlocation.slug,\n\t\t\t\tfile.basename,\n\t\t\t\tsplitMarkdown(finalCheck.content).body,\n\t\t\t);\n\t\t\tawait this.syncEngine.recordSynchronized(file, yuqueLink, finalCheck.content, updatedAt);\n\t\t\tnew Notice(risky ? '文档已在确认冲突风险后强制上传到语雀' : '文档已上传到语雀');\n\t\t\tthis.setStatus('文档上传完成', 3000);\n\t\t\treturn;\n\t\t}\n'''
+          if old not in s:
+              raise SystemExit('linked upload block missing')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+      - name: Add automated tests
+        run: |
+          mkdir -p tests
+          cat > tests/sync-classifier.test.ts <<'EOF'
+          import { describe, expect, it } from 'vitest';
+          import { classifySyncHashes } from '../src/sync-classifier';
+
+          describe('classifySyncHashes', () => {
+            it('marks identical content as synced and establishes the baseline', () => {
+              expect(classifySyncHashes('A', 'A', undefined)).toEqual({ status: 'synced', baseline: 'A' });
+            });
+
+            it('detects local-only changes', () => {
+              expect(classifySyncHashes('LOCAL', 'BASE', 'BASE')).toEqual({ status: 'local-changed', baseline: 'BASE' });
+            });
+
+            it('detects remote-only changes', () => {
+              expect(classifySyncHashes('BASE', 'REMOTE', 'BASE')).toEqual({ status: 'remote-changed', baseline: 'BASE' });
+            });
+
+            it('detects two-sided conflicts', () => {
+              expect(classifySyncHashes('LOCAL', 'REMOTE', 'BASE')).toEqual({ status: 'conflict', baseline: 'BASE' });
+            });
+
+            it('requires caution when no baseline exists', () => {
+              expect(classifySyncHashes('LOCAL', 'REMOTE', undefined)).toEqual({ status: 'different', baseline: undefined });
+            });
+          });
+          EOF
+
+          cat > tests/api-rate-limiter.test.ts <<'EOF'
+          import { afterEach, describe, expect, it, vi } from 'vitest';
+          import { YuqueApiRateLimiter } from '../src/api-rate-limiter';
+          import { DEFAULT_SETTINGS, type YuqueSyncSettings } from '../src/types';
+
+          function settings(overrides: Partial<YuqueSyncSettings> = {}): YuqueSyncSettings {
+            return {
+              ...DEFAULT_SETTINGS,
+              pendingCreates: {},
+              syncIndex: {},
+              dirtyFiles: [],
+              apiRequestHistory: [],
+              ...overrides,
+            };
+          }
+
+          afterEach(() => {
+            vi.useRealTimers();
+          });
+
+          describe('YuqueApiRateLimiter', () => {
+            it('holds the third request until the one-second window opens', async () => {
+              vi.useFakeTimers();
+              vi.setSystemTime(new Date('2026-08-11T00:00:00Z'));
+              const state = settings({ apiRatePerSecond: 2, apiRatePerMinute: 100, apiRatePerHour: 1000 });
+              const limiter = new YuqueApiRateLimiter(() => state, async () => undefined, () => undefined);
+              const calls: number[] = [];
+
+              const jobs = [1, 2, 3].map((value) => limiter.schedule(async () => {
+                calls.push(value);
+                return value;
+              }));
+              await vi.advanceTimersByTimeAsync(0);
+              expect(calls).toEqual([1, 2]);
+
+              await vi.advanceTimersByTimeAsync(1025);
+              await expect(Promise.all(jobs)).resolves.toEqual([1, 2, 3]);
+              expect(calls).toEqual([1, 2, 3]);
+              limiter.dispose();
+            });
+
+            it('removes an aborted queued scan request', async () => {
+              vi.useFakeTimers();
+              vi.setSystemTime(new Date('2026-08-11T00:00:00Z'));
+              const state = settings({ apiRatePerSecond: 1, apiRatePerMinute: 100, apiRatePerHour: 1000 });
+              const limiter = new YuqueApiRateLimiter(() => state, async () => undefined, () => undefined);
+              await limiter.schedule(async () => 'first');
+
+              const controller = new AbortController();
+              const queued = limiter.schedule(async () => 'second', 'low', controller.signal);
+              controller.abort();
+              await expect(queued).rejects.toMatchObject({ name: 'AbortError' });
+              expect(limiter.getSnapshot().queued).toBe(0);
+              limiter.dispose();
+            });
+
+            it('dispose rejects pending requests and clears the queue', async () => {
+              vi.useFakeTimers();
+              vi.setSystemTime(new Date('2026-08-11T00:00:00Z'));
+              const state = settings({ apiRatePerSecond: 1, apiRatePerMinute: 100, apiRatePerHour: 1000 });
+              const limiter = new YuqueApiRateLimiter(() => state, async () => undefined, () => undefined);
+              await limiter.schedule(async () => 'first');
+              const pending = limiter.schedule(async () => 'second', 'low');
+              limiter.dispose();
+              await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+              expect(limiter.getSnapshot().queued).toBe(0);
+            });
+          });
+          EOF
+      - name: Install test dependency and prepare 1.3.2
+        run: |
+          npm install --save-dev vitest
+          npm pkg set scripts.test="vitest run"
+          npm pkg set scripts.check="npm run lint && npm run test && npm run build"
+          npm version 1.3.2 --no-git-tag-version
+      - name: Run checks
+        run: npm run check
+      - name: Commit implementation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add main.ts src package.json package-lock.json manifest.json versions.json tests
+          git commit -m "安全：增加覆盖冲突保护与可取消 API 队列"
+          git push
