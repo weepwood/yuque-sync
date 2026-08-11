@@ -1,0 +1,86 @@
+name: Apply rate limiter temporary
+
+on:
+  push:
+    branches: [feat/yuque-api-rate-limiter]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-rate-limiter-temporary
+  cancel-in-progress: true
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feat/yuque-api-rate-limiter
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - name: Apply integration patches
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          main = Path('main.ts')
+          s = main.read_text()
+          old = """\t\tthis.client = new YuqueClient(\n\t\t\t() => this.pluginSettings.yuqueToken,\n\t\t\t() => this.pluginSettings.yuqueCookie,\n\t\t);"""
+          new = """\t\tthis.client = new YuqueClient(\n\t\t\t() => this.pluginSettings.yuqueToken,\n\t\t\t() => this.pluginSettings.yuqueCookie,\n\t\t\t() => this.pluginSettings,\n\t\t\t() => this.saveSettings(),\n\t\t\t(text) => this.setStatus(text),\n\t\t);"""
+          if old not in s:
+              raise SystemExit('YuqueClient constructor block not found')
+          s = s.replace(old, new, 1)
+
+          old = """\t\tvoid this.syncEngine?.flush();\n\t}"""
+          new = """\t\tvoid this.syncEngine?.flush();\n\t\tvoid this.client?.flushRateLimiter();\n\t}"""
+          if old not in s:
+              raise SystemExit('onunload block not found')
+          s = s.replace(old, new, 1)
+
+          old = """\t\t\tscanConcurrency: saved?.scanConcurrency ?? DEFAULT_SETTINGS.scanConcurrency,\n\t\t};"""
+          new = """\t\t\tscanConcurrency: saved?.scanConcurrency ?? DEFAULT_SETTINGS.scanConcurrency,\n\t\t\tapiRatePerSecond: saved?.apiRatePerSecond ?? DEFAULT_SETTINGS.apiRatePerSecond,\n\t\t\tapiRatePerMinute: saved?.apiRatePerMinute ?? DEFAULT_SETTINGS.apiRatePerMinute,\n\t\t\tapiRatePerHour: saved?.apiRatePerHour ?? DEFAULT_SETTINGS.apiRatePerHour,\n\t\t\tapiRequestHistory: saved?.apiRequestHistory ?? [],\n\t\t\tapiPausedUntil: saved?.apiPausedUntil ?? 0,\n\t\t\tapiLast429At: saved?.apiLast429At ?? null,\n\t\t};"""
+          if old not in s:
+              raise SystemExit('loadSettings tail not found')
+          s = s.replace(old, new, 1)
+          main.write_text(s)
+
+          engine = Path('src/sync-engine.ts')
+          s = engine.read_text()
+          old = "\treturn status === 429 || (status !== null && status >= 500 && status <= 599);"
+          new = "\t// HTTP 429 由 YuqueClient 的全局限流队列统一处理，避免 worker 重复退避。\n\treturn status !== null && status >= 500 && status <= 599;"
+          if old not in s:
+              raise SystemExit('isRetryable expression not found')
+          s = s.replace(old, new, 1)
+          old = "this.client.getDocument(location.bookId, location.slug)"
+          if old not in s:
+              raise SystemExit('scan getDocument call not found')
+          s = s.replace(old, "this.client.getDocument(location.bookId, location.slug, 'low')", 1)
+          engine.write_text(s)
+
+          readme = Path('README.md')
+          s = readme.read_text()
+          anchor = "## 大规模笔记库同步检测\n"
+          section = """## 语雀 OpenAPI 主动限流\n\n从 1.3.1 开始，插件不会只依赖并发数和 HTTP 429 被动退避，而是在所有语雀 OpenAPI 文档/目录请求前经过同一个全局请求队列。\n\n限流器同时检查最近 1 秒、1 分钟和 1 小时三个滑动窗口。默认采用插件侧保守值：\n\n- 每秒最多 2 次\n- 每分钟最多 50 次\n- 每小时最多 4000 次\n\n这些值是为了给其他客户端和突发操作预留空间的**插件保守默认值**，不声明为语雀官方硬上限。语雀调整 OpenAPI 配额后，可以在插件设置中直接修改三个窗口，无需改代码。公开资料常见的语雀小时限额为 5000 次；秒/分钟的当前硬限制请以语雀 OpenAPI 官方页面为准。\n\n请求优先级为：手动上传/下载 > 文档创建与目录操作 > 后台增量/完整检测。后台扫描即使有多个 worker，也不会绕过全局限流器。\n\n如果语雀返回 HTTP 429：\n\n1. 优先读取 `Retry-After`\n2. 暂停整个 OpenAPI 请求队列，而不是只暂停当前 worker\n3. `Retry-After` 不可用时默认暂停 60 秒\n4. 429 最多自动重试 3 次\n5. 最近一小时请求历史和暂停截止时间会持久化，重启 Obsidian 不会立刻把小时计数清零\n\n> 图片上传使用语雀网页 Cookie 的非公开上传接口，不计入这里的 OpenAPI 请求队列。\n\n"""
+          if '## 语雀 OpenAPI 主动限流' not in s:
+              if anchor not in s:
+                  raise SystemExit('README anchor not found')
+              s = s.replace(anchor, section + anchor, 1)
+          readme.write_text(s)
+          PY
+      - run: npm ci
+      - run: npm run check
+      - name: Commit integration
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add main.ts src/sync-engine.ts README.md
+          if git diff --cached --quiet; then
+            echo "No integration changes"
+            exit 0
+          fi
+          git commit -m "功能：接入全局 OpenAPI 主动限流"
+          git push
