@@ -1,0 +1,159 @@
+name: Fix batch push error handling temporary
+
+on:
+  push:
+    branches:
+      - fix/batch-push-stop-on-error
+    paths:
+      - .github/workflows/fix-batch-push-error-temporary.yml
+
+permissions:
+  contents: write
+
+jobs:
+  implement:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/batch-push-stop-on-error
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Apply source changes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('main.ts')
+          text = path.read_text()
+          text = text.replace(
+              "import { ConfirmModal } from './src/confirm-modal';\n",
+              "import { createBatchPushFailure } from './src/batch-push-error';\nimport { ConfirmModal } from './src/confirm-modal';\n",
+              1,
+          )
+
+          old = '''\t\tlet success = 0;\n\t\tlet recovered = 0;\n\t\tlet failed = 0;\n\t\tlet skipped = 0;\n\t\tlet tocFailed = 0;\n\t\tfor (const [index, file] of files.entries()) {\n\t\t\tthis.setStatus(`正在推送 ${index + 1}/${files.length}：${file.path}`);\n\t\t\ttry {\n\t\t\t\tif (!(await this.isUnlinkedSyncableFile(file))) {\n\t\t\t\t\tskipped += 1;\n\t\t\t\t\tcontinue;\n\t\t\t\t}\n\t\t\t\tconst result = await this.createYuqueDocumentForFile(file);\n\t\t\t\tsuccess += 1;\n\t\t\t\tif (result.recovered) {\n\t\t\t\t\trecovered += 1;\n\t\t\t\t}\n\t\t\t\tif (!result.addedToToc) {\n\t\t\t\t\ttocFailed += 1;\n\t\t\t\t}\n\t\t\t} catch (error) {\n\t\t\t\tfailed += 1;\n\t\t\t\tconsole.error(`[Yuque Sync] 批量创建失败：${file.path}`, error);\n\t\t\t}\n\t\t}\n\n\t\tconst parts = [`批量推送完成：成功 ${success}`];\n\t\tif (recovered) {\n\t\t\tparts.push(`恢复关联 ${recovered}`);\n\t\t}\n\t\tif (skipped) {\n\t\t\tparts.push(`跳过 ${skipped}`);\n\t\t}\n\t\tif (failed) {\n\t\t\tparts.push(`失败 ${failed}`);\n\t\t}\n\t\tif (tocFailed) {\n\t\t\tparts.push(`目录加入失败 ${tocFailed}`);\n\t\t}\n'''
+
+          new = '''\t\tlet success = 0;\n\t\tlet recovered = 0;\n\t\tlet skipped = 0;\n\t\tlet tocFailed = 0;\n\t\tfor (const [index, file] of files.entries()) {\n\t\t\tthis.setStatus(`正在推送 ${index + 1}/${files.length}：${file.path}`);\n\t\t\ttry {\n\t\t\t\tif (!(await this.isUnlinkedSyncableFile(file))) {\n\t\t\t\t\tskipped += 1;\n\t\t\t\t\tcontinue;\n\t\t\t\t}\n\t\t\t\tconst result = await this.createYuqueDocumentForFile(file);\n\t\t\t\tsuccess += 1;\n\t\t\t\tif (result.recovered) {\n\t\t\t\t\trecovered += 1;\n\t\t\t\t}\n\t\t\t\tif (!result.addedToToc) {\n\t\t\t\t\ttocFailed += 1;\n\t\t\t\t}\n\t\t\t} catch (error) {\n\t\t\t\tconsole.error(`[Yuque Sync] 批量创建失败并停止：${file.path}`, error);\n\t\t\t\tthrow createBatchPushFailure({\n\t\t\t\t\tfilePath: file.path,\n\t\t\t\t\tindex,\n\t\t\t\t\ttotal: files.length,\n\t\t\t\t\tsuccess,\n\t\t\t\t\trecovered,\n\t\t\t\t\tskipped,\n\t\t\t\t\ttocFailed,\n\t\t\t\t\terror,\n\t\t\t\t});\n\t\t\t}\n\t\t}\n\n\t\tconst parts = [`批量推送完成：成功 ${success}`];\n\t\tif (recovered) {\n\t\t\tparts.push(`恢复关联 ${recovered}`);\n\t\t}\n\t\tif (skipped) {\n\t\t\tparts.push(`跳过 ${skipped}`);\n\t\t}\n\t\tif (tocFailed) {\n\t\t\tparts.push(`目录加入失败 ${tocFailed}`);\n\t\t}\n'''
+
+          if old not in text:
+              raise SystemExit('batch push block not found')
+          text = text.replace(old, new, 1)
+
+          old_error = '''\t\t\tconst message = describeError(error);\n\t\t\tnew Notice(`语雀同步失败：${message}`);\n\t\t\tthis.setStatus(`语雀同步失败：${message}`, 5000);\n'''
+          new_error = '''\t\t\tconst message = describeError(error);\n\t\t\tconst failureMessage = `语雀同步失败：${message}`;\n\t\t\tnew Notice(failureMessage, 12000);\n\t\t\tthis.setStatus(failureMessage, 10000);\n'''
+          if old_error not in text:
+              raise SystemExit('runExclusive error block not found')
+          text = text.replace(old_error, new_error, 1)
+          path.write_text(text)
+          PY
+
+          cat > src/batch-push-error.ts <<'EOF'
+          import { describeError } from './markdown-utils';
+
+          export interface BatchPushFailureDetails {
+          	filePath: string;
+          	index: number;
+          	total: number;
+          	success: number;
+          	recovered: number;
+          	skipped: number;
+          	tocFailed: number;
+          	error: unknown;
+          }
+
+          export function createBatchPushFailure(details: BatchPushFailureDetails): Error {
+          	const position = Math.min(Math.max(details.index + 1, 1), Math.max(details.total, 1));
+          	const remaining = Math.max(0, details.total - details.index - 1);
+          	const stats = [`已成功 ${details.success} 篇`];
+          	if (details.recovered > 0) stats.push(`恢复关联 ${details.recovered} 篇`);
+          	if (details.skipped > 0) stats.push(`跳过 ${details.skipped} 篇`);
+          	if (details.tocFailed > 0) stats.push(`目录加入失败 ${details.tocFailed} 篇`);
+          	stats.push(`剩余 ${remaining} 篇未执行`);
+
+          	const failure = new Error(
+          		`批量推送已停止：第 ${position}/${details.total} 篇「${details.filePath}」推送失败。` +
+          		`错误：${describeError(details.error)}。${stats.join('，')}。`,
+          	);
+          	failure.name = 'BatchPushError';
+          	return failure;
+          }
+          EOF
+
+          cat > tests/batch-push-error.test.ts <<'EOF'
+          import { describe, expect, it } from 'vitest';
+          import { createBatchPushFailure } from '../src/batch-push-error';
+
+          describe('createBatchPushFailure', () => {
+          	it('includes the failed file, original error and stops remaining work in the message', () => {
+          		const failure = createBatchPushFailure({
+          			filePath: 'Notes/failing.md',
+          			index: 2,
+          			total: 10,
+          			success: 2,
+          			recovered: 1,
+          			skipped: 0,
+          			tocFailed: 1,
+          			error: new Error('HTTP 422: repository full'),
+          		});
+
+          		expect(failure.name).toBe('BatchPushError');
+          		expect(failure.message).toContain('第 3/10 篇');
+          		expect(failure.message).toContain('Notes/failing.md');
+          		expect(failure.message).toContain('HTTP 422: repository full');
+          		expect(failure.message).toContain('已成功 2 篇');
+          		expect(failure.message).toContain('恢复关联 1 篇');
+          		expect(failure.message).toContain('目录加入失败 1 篇');
+          		expect(failure.message).toContain('剩余 7 篇未执行');
+          	});
+
+          	it('reports zero remaining documents when the last document fails', () => {
+          		const failure = createBatchPushFailure({
+          			filePath: 'last.md',
+          			index: 4,
+          			total: 5,
+          			success: 4,
+          			recovered: 0,
+          			skipped: 0,
+          			tocFailed: 0,
+          			error: 'network unavailable',
+          		});
+
+          		expect(failure.message).toContain('第 5/5 篇');
+          		expect(failure.message).toContain('network unavailable');
+          		expect(failure.message).toContain('剩余 0 篇未执行');
+          	});
+          });
+          EOF
+
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('README.md')
+          text = path.read_text()
+          anchor = '- **批量推送未关联文档**：将没有 `yuque_link` 的 Markdown 文档串行创建到自动管理的知识库池，并写回链接\n'
+          replacement = anchor + '- **批量推送失败保护**：某篇文档真正推送失败时立即停止后续任务，并显示失败文件、原始错误、已完成数量与剩余未执行数量\n'
+          if anchor not in text:
+              raise SystemExit('README feature anchor not found')
+          path.write_text(text.replace(anchor, replacement, 1))
+          PY
+
+      - name: Prepare version 1.3.4
+        run: npm version 1.3.4 --no-git-tag-version
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Run full project checks
+        run: npm run check
+
+      - name: Commit implementation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add main.ts src/batch-push-error.ts tests/batch-push-error.test.ts README.md package.json package-lock.json manifest.json versions.json
+          git commit -m "修复：批量推送失败时提示错误并停止后续任务"
+          git push origin HEAD:fix/batch-push-stop-on-error
