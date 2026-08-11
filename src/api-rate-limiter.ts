@@ -230,7 +230,7 @@ export class YuqueApiRateLimiter {
 			this.active += 1;
 			void request.operation()
 				.then(request.resolve, (error: unknown) => {
-					if (this.isRateLimitError(error)) {
+					if (!this.disposed && this.isRateLimitError(error)) {
 						this.pauseForRateLimit(error);
 					}
 					request.reject(error);
@@ -243,6 +243,7 @@ export class YuqueApiRateLimiter {
 	}
 
 	private pauseForRateLimit(error: unknown): void {
+		if (this.disposed) return;
 		const now = Date.now();
 		const settings = this.getSettings();
 		const retryAfterMs = parseRetryAfterMs(error, now) ?? DEFAULT_RATE_LIMIT_PAUSE_MS;
@@ -314,6 +315,7 @@ export class YuqueApiRateLimiter {
 	}
 
 	private scheduleWake(waitMs: number): void {
+		if (this.disposed) return;
 		const safeWait = Math.max(20, Math.ceil(waitMs));
 		const target = Date.now() + safeWait;
 		if (this.wakeTimer !== null && this.wakeAt <= target) {
@@ -331,7 +333,7 @@ export class YuqueApiRateLimiter {
 	}
 
 	private schedulePersist(): void {
-		if (this.persistTimer !== null) {
+		if (this.disposed || this.persistTimer !== null) {
 			return;
 		}
 		this.persistTimer = window.setTimeout(() => {
