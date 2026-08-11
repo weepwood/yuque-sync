@@ -225,7 +225,7 @@ export class YuqueSyncSettingTab extends PluginSettingTab {
 		this.addPositiveIntegerSetting(
 			group,
 			'每小时请求上限',
-			'请求历史会跨 Obsidian 重启持久化。插件默认 4000 次/小时，低于公开资料常见的 5000 次/小时限制。',
+			'请求历史会跨 Obsidian 重启持久化。插件默认 4000 次/小时，这是保守安全值；请按语雀官方 OpenAPI 页面当前额度调整。',
 			this.host.pluginSettings.apiRatePerHour,
 			(value) => { this.host.pluginSettings.apiRatePerHour = value; },
 		);
