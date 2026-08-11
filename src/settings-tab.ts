@@ -49,7 +49,7 @@ export class YuqueSyncSettingTab extends PluginSettingTab {
 
 		new Setting(connectionGroup)
 			.setName('Yuque Token')
-			.setDesc('用于文档读取、创建和更新。可在语雀账户设置中生成。')
+			.setDesc('用于文档读取、创建、更新，以及自动创建和管理同步知识库。可在语雀账户设置中生成。')
 			.addText((text) => {
 				text.setPlaceholder('请输入 Token')
 					.setValue(this.host.pluginSettings.yuqueToken)
@@ -62,18 +62,16 @@ export class YuqueSyncSettingTab extends PluginSettingTab {
 				text.inputEl.addClass('yuque-sync-wide-input');
 			});
 
+		const managedBooks = this.host.pluginSettings.managedBooks ?? [];
+		const currentBook = managedBooks[managedBooks.length - 1];
+		const currentCount = currentBook && currentBook.documentCount >= 0
+			? `${currentBook.documentCount} / 4800`
+			: '待首次容量校验';
 		new Setting(connectionGroup)
-			.setName('默认知识库')
-			.setDesc('新建语雀文档时使用，格式为 namespace/book。')
-			.addText((text) => {
-				text.setPlaceholder('weepwood/test')
-					.setValue(this.host.pluginSettings.defaultBookId)
-					.onChange((value) => {
-						this.host.pluginSettings.defaultBookId = value.trim();
-						this.scheduleSave();
-					});
-				text.inputEl.addClass('yuque-sync-wide-input');
-			});
+			.setName('自动知识库分片')
+			.setDesc(managedBooks.length > 0
+				? `无需配置知识库。当前 Token 账号：${this.host.pluginSettings.managedBookOwnerLogin || '自动识别'}；已托管 ${managedBooks.length} 个知识库；当前 ${currentBook?.name ?? '-'}（${currentCount}）。接近 4800 篇时会自动创建下一库。`
+				: '无需配置知识库。首次创建文档时，插件会使用 Token 自动识别语雀账号并创建私密的 Obsidian Sync 001；接近 4800 篇时自动创建 002、003……');
 
 		new Setting(connectionGroup)
 			.setName('Yuque Cookie')

@@ -17,12 +17,12 @@ import {
 	formatFileTimestamp,
 	getStringProperty,
 	isYuqueSyncDisabled,
-	normalizeBookId,
 	readFrontmatter,
 	replaceImageReferences,
 	safeDecodeURIComponent,
 	splitMarkdown,
 } from './src/markdown-utils';
+import { ManagedBookPool } from './src/managed-book-pool';
 import { YuqueSyncSettingTab } from './src/settings-tab';
 import { SyncEngine } from './src/sync-engine';
 import {
@@ -66,12 +66,20 @@ export default class YuqueSyncPlugin extends Plugin {
 	private statusTimer: number | null = null;
 	private operationInProgress = false;
 	private syncEngine!: SyncEngine;
+	private bookPool!: ManagedBookPool;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
 		this.client = new YuqueClient(
 			() => this.pluginSettings.yuqueToken,
 			() => this.pluginSettings.yuqueCookie,
+			() => this.pluginSettings,
+			() => this.saveSettings(),
+			(text) => this.setStatus(text),
+		);
+		this.bookPool = new ManagedBookPool(
+			this.client,
+			() => this.pluginSettings.yuqueToken,
 			() => this.pluginSettings,
 			() => this.saveSettings(),
 			(text) => this.setStatus(text),
@@ -173,6 +181,8 @@ export default class YuqueSyncPlugin extends Plugin {
 			...DEFAULT_SETTINGS,
 			...saved,
 			yuqueToken: migratedToken,
+			managedBookOwnerLogin: saved?.managedBookOwnerLogin ?? '',
+			managedBooks: saved?.managedBooks ?? [],
 			pendingCreates: saved?.pendingCreates ?? {},
 			syncIndex: saved?.syncIndex ?? {},
 			dirtyFiles: saved?.dirtyFiles ?? [],
@@ -295,11 +305,10 @@ export default class YuqueSyncPlugin extends Plugin {
 			return;
 		}
 
-		const bookId = this.requireDefaultBookId();
 		const confirmed = await ConfirmModal.show(
 			this.app,
 			'创建语雀文档？',
-			`当前文件没有 yuque_link，将在 ${bookId} 中创建新文档。`,
+			'当前文件没有 yuque_link。插件会根据容量自动选择或创建私密语雀知识库，然后创建文档。',
 		);
 		if (!confirmed) {
 			return;
@@ -309,7 +318,7 @@ export default class YuqueSyncPlugin extends Plugin {
 		if (getStringProperty(readFrontmatter(latestContent), 'yuque_link')) {
 			throw new Error('确认期间当前文件已关联语雀文档，请重新执行上传');
 		}
-		const result = await this.createYuqueDocumentForFile(file, bookId);
+		const result = await this.createYuqueDocumentForFile(file);
 		new Notice(result.recovered
 			? '已恢复之前创建的语雀文档关联'
 			: result.addedToToc
@@ -342,7 +351,6 @@ export default class YuqueSyncPlugin extends Plugin {
 	}
 	private async pushUnlinkedDocuments(): Promise<void> {
 		this.requireToken();
-		const bookId = this.requireDefaultBookId();
 		const { files, invalidCount } = await this.collectUnlinkedDocuments();
 		if (files.length === 0) {
 			new Notice(invalidCount
@@ -354,7 +362,7 @@ export default class YuqueSyncPlugin extends Plugin {
 		const confirmed = await ConfirmModal.show(
 			this.app,
 			'批量创建语雀文档？',
-			`将在 ${bookId} 中创建 ${files.length} 篇未关联文档。任务会串行执行，并为成功创建的文档写回 yuque_link。${invalidCount ? `\n另有 ${invalidCount} 篇文档因读取或 YAML 异常不会处理。` : ''}`,
+			`将创建 ${files.length} 篇未关联文档。插件会按容量自动选择或创建私密语雀知识库，任务串行执行，并为成功创建的文档写回 yuque_link。${invalidCount ? `\n另有 ${invalidCount} 篇文档因读取或 YAML 异常不会处理。` : ''}`,
 		);
 		if (!confirmed) {
 			return;
@@ -372,7 +380,7 @@ export default class YuqueSyncPlugin extends Plugin {
 					skipped += 1;
 					continue;
 				}
-				const result = await this.createYuqueDocumentForFile(file, bookId);
+				const result = await this.createYuqueDocumentForFile(file);
 				success += 1;
 				if (result.recovered) {
 					recovered += 1;
@@ -437,7 +445,7 @@ export default class YuqueSyncPlugin extends Plugin {
 		return !isYuqueSyncDisabled(frontmatter) && !getStringProperty(frontmatter, 'yuque_link');
 	}
 
-	private async createYuqueDocumentForFile(file: TFile, bookId: string): Promise<CreateDocumentResult> {
+	private async createYuqueDocumentForFile(file: TFile): Promise<CreateDocumentResult> {
 		const content = await this.app.vault.read(file);
 		const frontmatter = readFrontmatter(content);
 		if (isYuqueSyncDisabled(frontmatter)) {
@@ -452,11 +460,23 @@ export default class YuqueSyncPlugin extends Plugin {
 			return recovered;
 		}
 
-		const created = await this.client.createDocument(
-			bookId,
-			file.basename,
-			splitMarkdown(content).body,
-		);
+		let bookId = await this.bookPool.allocateBook();
+		let created;
+		try {
+			created = await this.client.createDocument(
+				bookId,
+				file.basename,
+				splitMarkdown(content).body,
+			);
+		} catch (error) {
+			if (!(await this.bookPool.shouldRerouteAfterCreateFailure(bookId, error))) throw error;
+			bookId = await this.bookPool.allocateBook();
+			created = await this.client.createDocument(
+				bookId,
+				file.basename,
+				splitMarkdown(content).body,
+			);
+		}
 		const yuqueLink = `https://www.yuque.com/${bookId}/${created.slug}`;
 		this.pluginSettings.pendingCreates[file.path] = {
 			yuqueLink,
@@ -464,6 +484,7 @@ export default class YuqueSyncPlugin extends Plugin {
 			createdAt: Date.now(),
 		};
 		await this.saveSettings();
+		await this.bookPool.recordDocumentCreated(bookId);
 
 		let latestContent: string;
 		try {
@@ -846,14 +867,6 @@ export default class YuqueSyncPlugin extends Plugin {
 		if (!this.pluginSettings.yuqueToken.trim()) {
 			throw new Error('请先在插件设置中配置 Yuque Token');
 		}
-	}
-
-	private requireDefaultBookId(): string {
-		const bookId = normalizeBookId(this.pluginSettings.defaultBookId);
-		if (!bookId) {
-			throw new Error('请在设置中填写格式为 namespace/book 的默认知识库');
-		}
-		return bookId;
 	}
 
 	private requireCookie(): void {

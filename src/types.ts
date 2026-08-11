@@ -1,3 +1,12 @@
+export interface ManagedYuqueBook {
+	namespace: string;
+	name: string;
+	slug: string;
+	documentCount: number;
+	countCheckedAt: number;
+	createdAt: number;
+}
+
 export interface PendingCreate {
 	yuqueLink: string;
 	documentId: number;
@@ -46,8 +55,11 @@ export interface ScanSession {
 
 export interface YuqueSyncSettings {
 	yuqueToken: string;
+	/** @deprecated 1.3.3 起新文档由插件自动选择/创建知识库，仅保留旧配置兼容。 */
 	defaultBookId: string;
 	yuqueCookie: string;
+	managedBookOwnerLogin: string;
+	managedBooks: ManagedYuqueBook[];
 	pendingCreates: Record<string, PendingCreate>;
 	syncIndex: Record<string, SyncIndexEntry>;
 	dirtyFiles: string[];
@@ -68,6 +80,8 @@ export const DEFAULT_SETTINGS: YuqueSyncSettings = {
 	yuqueToken: '',
 	defaultBookId: '',
 	yuqueCookie: '',
+	managedBookOwnerLogin: '',
+	managedBooks: [],
 	pendingCreates: {},
 	syncIndex: {},
 	dirtyFiles: [],
@@ -85,6 +99,21 @@ export const DEFAULT_SETTINGS: YuqueSyncSettings = {
 	apiPausedUntil: 0,
 	apiLast429At: null,
 };
+
+export interface YuqueUserProfile {
+	id: number;
+	login: string;
+	name: string;
+}
+
+export interface YuqueBookSummary {
+	id: number;
+	name: string;
+	slug: string;
+	namespace: string;
+	description: string;
+	public: number;
+}
 
 export interface YuqueLocation {
 	bookId: string;
