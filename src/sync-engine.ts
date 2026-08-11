@@ -8,6 +8,7 @@ import {
 	readFrontmatter,
 	splitMarkdown,
 } from './markdown-utils';
+import { classifySyncHashes } from './sync-classifier';
 import type {
 	ScanMode,
 	ScanSummary,
@@ -40,6 +41,14 @@ interface LocalSnapshot {
 	size: number;
 }
 
+export interface UploadPreparation {
+	content: string;
+	status: SyncStatus;
+	remoteHash: string;
+	remoteUpdatedAt: string;
+	detail?: string;
+}
+
 export interface SyncScanReport {
 	results: SyncScanResult[];
 	summary: ScanSummary;
@@ -61,6 +70,10 @@ function isRetryable(error: unknown): boolean {
 	const status = getHttpStatus(error);
 	// HTTP 429 由 YuqueClient 的全局限流队列统一处理，避免 worker 重复退避。
 	return status !== null && status >= 500 && status <= 599;
+}
+
+function isAbortError(error: unknown): boolean {
+	return error instanceof Error && error.name === 'AbortError';
 }
 
 function sleep(milliseconds: number): Promise<void> {
@@ -91,32 +104,6 @@ async function hashMarkdownBody(content: string): Promise<string> {
 	return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, '0')).join('');
 }
 
-function classifyHashes(
-	localHash: string,
-	remoteHash: string,
-	baseline: string | undefined,
-): { status: SyncStatus; baseline: string | undefined } {
-	if (localHash === remoteHash) {
-		return { status: 'synced', baseline: localHash };
-	}
-	if (!baseline) {
-		return { status: 'different', baseline: undefined };
-	}
-
-	const localChanged = localHash !== baseline;
-	const remoteChanged = remoteHash !== baseline;
-	if (localChanged && remoteChanged) {
-		return { status: 'conflict', baseline };
-	}
-	if (localChanged) {
-		return { status: 'local-changed', baseline };
-	}
-	if (remoteChanged) {
-		return { status: 'remote-changed', baseline };
-	}
-	return { status: 'different', baseline };
-}
-
 function statusDetail(status: SyncStatus): string | undefined {
 	switch (status) {
 		case 'local-changed':
@@ -139,6 +126,7 @@ export class SyncEngine {
 	private saveTimer: number | null = null;
 	private scanning = false;
 	private cancelRequested = false;
+	private scanAbortController: AbortController | null = null;
 
 	constructor(
 		private readonly app: App,
@@ -204,7 +192,18 @@ export class SyncEngine {
 			return false;
 		}
 		this.cancelRequested = true;
+		this.scanAbortController?.abort();
 		return true;
+	}
+
+	dispose(): void {
+		this.cancelRequested = true;
+		this.scanAbortController?.abort();
+		this.scanAbortController = null;
+		if (this.saveTimer !== null) {
+			window.clearTimeout(this.saveTimer);
+			this.saveTimer = null;
+		}
 	}
 
 	async flush(): Promise<void> {
@@ -219,6 +218,9 @@ export class SyncEngine {
 		const startedAt = Date.now();
 		this.cancelRequested = false;
 		this.scanning = true;
+		const scanAbortController = new AbortController();
+		this.scanAbortController = scanAbortController;
+		const { signal } = scanAbortController;
 
 		try {
 			const files = this.app.vault.getMarkdownFiles().filter((file) => !this.isExcludedFile(file));
@@ -241,7 +243,7 @@ export class SyncEngine {
 						remoteRequired: new Set(files.map((file) => file.path)),
 						remoteMetadataHits: 0,
 					}
-					: await this.buildIncrementalPlan(files);
+					: await this.buildIncrementalPlan(files, signal);
 				settings.scanSession = {
 					mode,
 					total: plan.paths.length,
@@ -280,13 +282,17 @@ export class SyncEngine {
 					this.setStatus(`正在${mode === 'full' ? '完整' : '增量'}检测 ${completedBefore + 1}/${plan.paths.length}：${file.path}`);
 					let snapshotStable = false;
 					try {
-						const result = await this.scanFile(file, mode, mode === 'full' || plan.remoteRequired.has(path));
+						const result = await this.scanFile(file, mode, mode === 'full' || plan.remoteRequired.has(path), signal);
 						settings.syncIndex[path] = result.entry;
 						snapshotStable = file.stat.mtime === result.entry.mtime && file.stat.size === result.entry.size;
 						if (result.remoteRequest) {
 							remoteBodyRequests += 1;
 						}
 					} catch (error) {
+						if (isAbortError(error)) {
+							this.dirtyPaths.add(path);
+							return;
+						}
 						settings.syncIndex[path] = {
 							path,
 							mtime: file.stat.mtime,
@@ -340,10 +346,63 @@ export class SyncEngine {
 				},
 			};
 		} finally {
+			if (this.scanAbortController === scanAbortController) {
+				this.scanAbortController = null;
+			}
 			this.scanning = false;
 			this.cancelRequested = false;
 			this.schedulePersist();
 		}
+	}
+
+	async prepareUpload(file: TFile, yuqueLink: string): Promise<UploadPreparation> {
+		const location = extractYuqueLocation(yuqueLink);
+		if (!location) {
+			throw new Error('yuque_link 不是有效的语雀文档地址');
+		}
+		const snapshot = await this.readStableSnapshot(file);
+		const frontmatter = readFrontmatter(snapshot.content);
+		if (isYuqueSyncDisabled(frontmatter)) {
+			throw new Error('当前文件设置了 yuque_sync: false，已禁止语雀同步');
+		}
+		if (getStringProperty(frontmatter, 'yuque_link') !== yuqueLink) {
+			throw new Error('上传检查期间 yuque_link 已发生变化，请重新执行上传');
+		}
+
+		const remote = await this.client.getDocument(location.bookId, location.slug, 'high');
+		if (file.stat.mtime !== snapshot.mtime || file.stat.size !== snapshot.size) {
+			this.dirtyPaths.add(file.path);
+			throw new Error('上传检查期间本地文档已发生变化，请重新执行上传');
+		}
+		const localHash = await hashMarkdownBody(snapshot.content);
+		const remoteHash = await hashMarkdownBody(remote.content);
+		const previous = this.getSettings().syncIndex[file.path];
+		const previousForLink = previous?.yuqueLink === yuqueLink ? previous : undefined;
+		const classification = classifySyncHashes(localHash, remoteHash, previousForLink?.lastSyncedHash);
+		const now = Date.now();
+		this.getSettings().syncIndex[file.path] = {
+			path: file.path,
+			mtime: snapshot.mtime,
+			size: snapshot.size,
+			status: classification.status,
+			yuqueLink,
+			localHash,
+			remoteHash,
+			lastSyncedHash: classification.baseline,
+			remoteUpdatedAt: remote.updatedAt || undefined,
+			remoteCheckedAt: now,
+			lastCheckedAt: now,
+			detail: statusDetail(classification.status),
+		};
+		this.reconcileDirtyPath(file, snapshot);
+		await this.persistNow();
+		return {
+			content: snapshot.content,
+			status: classification.status,
+			remoteHash,
+			remoteUpdatedAt: remote.updatedAt,
+			detail: statusDetail(classification.status),
+		};
 	}
 
 	async recordSynchronized(
@@ -387,7 +446,7 @@ export class SyncEngine {
 		const remoteHash = await hashMarkdownBody(remoteContent);
 		const previous = this.getSettings().syncIndex[file.path];
 		const previousForLink = previous?.yuqueLink === yuqueLink ? previous : undefined;
-		const classification = classifyHashes(localHash, remoteHash, previousForLink?.lastSyncedHash);
+		const classification = classifySyncHashes(localHash, remoteHash, previousForLink?.lastSyncedHash);
 		const now = Date.now();
 		this.getSettings().syncIndex[file.path] = {
 			path: file.path,
@@ -407,7 +466,7 @@ export class SyncEngine {
 		await this.persistNow();
 	}
 
-	private async buildIncrementalPlan(files: TFile[]): Promise<ScanPlan> {
+	private async buildIncrementalPlan(files: TFile[], signal: AbortSignal): Promise<ScanPlan> {
 		const settings = this.getSettings();
 		const planned = new Map<string, boolean>();
 		for (const file of files) {
@@ -422,7 +481,7 @@ export class SyncEngine {
 			}
 		}
 
-		const remoteRefresh = await this.refreshRemoteCandidates(files, planned);
+		const remoteRefresh = await this.refreshRemoteCandidates(files, planned, signal);
 		for (const path of remoteRefresh.remoteRequired) {
 			planned.set(path, true);
 		}
@@ -439,6 +498,7 @@ export class SyncEngine {
 	private async refreshRemoteCandidates(
 		files: TFile[],
 		alreadyPlanned: ReadonlyMap<string, boolean>,
+		signal: AbortSignal,
 	): Promise<{ remoteRequired: Set<string>; metadataHits: number }> {
 		const settings = this.getSettings();
 		const ttlMs = Math.max(1, settings.remoteCheckTtlHours || 24) * 60 * 60 * 1000;
@@ -491,7 +551,7 @@ export class SyncEngine {
 				}
 				const [bookId, items] = group;
 				try {
-					const documents = await withRetry(() => this.client.listDocuments(bookId));
+					const documents = await withRetry(() => this.client.listDocuments(bookId, 'low', signal));
 					const bySlug = new Map(documents.map((document) => [document.slug, document]));
 					for (const item of items) {
 						const entry = settings.syncIndex[item.path];
@@ -509,6 +569,7 @@ export class SyncEngine {
 						}
 					}
 				} catch (error) {
+					if (isAbortError(error)) throw error;
 					console.warn(`[Yuque Sync] 无法批量读取语雀知识库元数据，改用预算降级：${bookId}`, error);
 					for (const item of items) {
 						fallback.add(item.path);
@@ -534,7 +595,12 @@ export class SyncEngine {
 		return { remoteRequired, metadataHits };
 	}
 
-	private async scanFile(file: TFile, mode: ScanMode, remoteRequired: boolean): Promise<ScanFileResult> {
+	private async scanFile(
+		file: TFile,
+		mode: ScanMode,
+		remoteRequired: boolean,
+		signal: AbortSignal,
+	): Promise<ScanFileResult> {
 		const settings = this.getSettings();
 		const previous = settings.syncIndex[file.path];
 		const now = Date.now();
@@ -627,9 +693,9 @@ export class SyncEngine {
 		}
 
 		try {
-			const remote = await withRetry(() => this.client.getDocument(location.bookId, location.slug, 'low'));
+			const remote = await withRetry(() => this.client.getDocument(location.bookId, location.slug, 'low', signal));
 			const remoteHash = await hashMarkdownBody(remote.content);
-			const classification = classifyHashes(localHash, remoteHash, previousForLink?.lastSyncedHash);
+			const classification = classifySyncHashes(localHash, remoteHash, previousForLink?.lastSyncedHash);
 			return {
 				remoteRequest: true,
 				entry: {
@@ -648,6 +714,7 @@ export class SyncEngine {
 				},
 			};
 		} catch (error) {
+			if (isAbortError(error)) throw error;
 			const status: SyncStatus = getHttpStatus(error) === 404 ? 'remote-missing' : 'error';
 			return {
 				remoteRequest: true,

@@ -17,18 +17,19 @@ import {
 	formatFileTimestamp,
 	getStringProperty,
 	isYuqueSyncDisabled,
-	normalizeBookId,
 	readFrontmatter,
 	replaceImageReferences,
 	safeDecodeURIComponent,
 	splitMarkdown,
 } from './src/markdown-utils';
+import { ManagedBookPool } from './src/managed-book-pool';
 import { YuqueSyncSettingTab } from './src/settings-tab';
 import { SyncEngine } from './src/sync-engine';
 import {
 	DEFAULT_SETTINGS,
 	type ImageReference,
 	type ScanMode,
+	type SyncStatus,
 	type YuqueSyncSettings,
 } from './src/types';
 import { YuqueClient } from './src/yuque-client';
@@ -65,12 +66,20 @@ export default class YuqueSyncPlugin extends Plugin {
 	private statusTimer: number | null = null;
 	private operationInProgress = false;
 	private syncEngine!: SyncEngine;
+	private bookPool!: ManagedBookPool;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
 		this.client = new YuqueClient(
 			() => this.pluginSettings.yuqueToken,
 			() => this.pluginSettings.yuqueCookie,
+			() => this.pluginSettings,
+			() => this.saveSettings(),
+			(text) => this.setStatus(text),
+		);
+		this.bookPool = new ManagedBookPool(
+			this.client,
+			() => this.pluginSettings.yuqueToken,
 			() => this.pluginSettings,
 			() => this.saveSettings(),
 			(text) => this.setStatus(text),
@@ -159,6 +168,8 @@ export default class YuqueSyncPlugin extends Plugin {
 		if (this.statusTimer !== null) {
 			window.clearTimeout(this.statusTimer);
 		}
+		this.syncEngine?.dispose();
+		this.client?.dispose();
 		void this.syncEngine?.flush();
 		void this.client?.flushRateLimiter();
 	}
@@ -170,6 +181,8 @@ export default class YuqueSyncPlugin extends Plugin {
 			...DEFAULT_SETTINGS,
 			...saved,
 			yuqueToken: migratedToken,
+			managedBookOwnerLogin: saved?.managedBookOwnerLogin ?? '',
+			managedBooks: saved?.managedBooks ?? [],
 			pendingCreates: saved?.pendingCreates ?? {},
 			syncIndex: saved?.syncIndex ?? {},
 			dirtyFiles: saved?.dirtyFiles ?? [],
@@ -221,6 +234,11 @@ export default class YuqueSyncPlugin extends Plugin {
 		try {
 			await operation();
 		} catch (error) {
+			if (error instanceof Error && error.name === 'AbortError') {
+				new Notice('语雀同步任务已暂停');
+				this.setStatus('同步任务已暂停', 3000);
+				return;
+			}
 			console.error('[Yuque Sync] 操作失败', error);
 			const message = describeError(error);
 			new Notice(`语雀同步失败：${message}`);
@@ -252,37 +270,45 @@ export default class YuqueSyncPlugin extends Plugin {
 			if (!location) {
 				throw new Error('yuque_link 不是有效的语雀文档地址');
 			}
+
+			const firstCheck = await this.syncEngine.prepareUpload(file, yuqueLink);
+			const riskyStatuses = new Set<SyncStatus>(['remote-changed', 'conflict', 'different']);
+			const risky = riskyStatuses.has(firstCheck.status);
+			const descriptions: Partial<Record<SyncStatus, string>> = {
+				'remote-changed': '语雀正文已相对最近同步基线发生变化，而本地正文没有对应修改。强制上传会丢失语雀端修改。',
+				conflict: '本地与语雀正文都已相对最近同步基线发生变化。强制上传会丢失语雀端修改。',
+				different: '两端正文不同，但尚未建立可靠的最近同步基线，无法自动判断正确同步方向。',
+				'local-changed': '仅检测到本地正文变化，可以上传到语雀。',
+				synced: '当前本地与语雀正文一致。继续上传会刷新语雀标题与更新时间。',
+			};
 			const confirmed = await ConfirmModal.show(
 				this.app,
-				'上传到语雀？',
-				`将使用本地内容覆盖语雀文档：${file.basename}`,
+				risky ? '检测到远端修改，仍要强制覆盖？' : '上传到语雀？',
+				`${descriptions[firstCheck.status] ?? firstCheck.detail ?? '已完成上传前同步状态检查'}\n文档：${file.basename}`,
 			);
-			if (!confirmed) {
-				return;
-			}
+			if (!confirmed) return;
 
-			const latestContent = await this.app.vault.read(file);
-			const latestLink = getStringProperty(readFrontmatter(latestContent), 'yuque_link');
-			if (latestLink !== yuqueLink) {
-				throw new Error('确认期间 yuque_link 已发生变化，请重新执行上传');
+			// 确认窗口停留期间远端可能再次变化，因此写入前再做一次短检查。
+			const finalCheck = await this.syncEngine.prepareUpload(file, yuqueLink);
+			if (finalCheck.remoteHash !== firstCheck.remoteHash) {
+				throw new Error('确认期间语雀文档又发生了变化，为避免覆盖新内容，本次上传已取消');
 			}
 			const updatedAt = await this.client.updateDocument(
 				location.bookId,
 				location.slug,
 				file.basename,
-				splitMarkdown(latestContent).body,
+				splitMarkdown(finalCheck.content).body,
 			);
-			await this.syncEngine.recordSynchronized(file, yuqueLink, latestContent, updatedAt);
-			new Notice('文档已上传到语雀');
+			await this.syncEngine.recordSynchronized(file, yuqueLink, finalCheck.content, updatedAt);
+			new Notice(risky ? '文档已在确认冲突风险后强制上传到语雀' : '文档已上传到语雀');
 			this.setStatus('文档上传完成', 3000);
 			return;
 		}
 
-		const bookId = this.requireDefaultBookId();
 		const confirmed = await ConfirmModal.show(
 			this.app,
 			'创建语雀文档？',
-			`当前文件没有 yuque_link，将在 ${bookId} 中创建新文档。`,
+			'当前文件没有 yuque_link。插件会根据容量自动选择或创建私密语雀知识库，然后创建文档。',
 		);
 		if (!confirmed) {
 			return;
@@ -292,7 +318,7 @@ export default class YuqueSyncPlugin extends Plugin {
 		if (getStringProperty(readFrontmatter(latestContent), 'yuque_link')) {
 			throw new Error('确认期间当前文件已关联语雀文档，请重新执行上传');
 		}
-		const result = await this.createYuqueDocumentForFile(file, bookId);
+		const result = await this.createYuqueDocumentForFile(file);
 		new Notice(result.recovered
 			? '已恢复之前创建的语雀文档关联'
 			: result.addedToToc
@@ -325,7 +351,6 @@ export default class YuqueSyncPlugin extends Plugin {
 	}
 	private async pushUnlinkedDocuments(): Promise<void> {
 		this.requireToken();
-		const bookId = this.requireDefaultBookId();
 		const { files, invalidCount } = await this.collectUnlinkedDocuments();
 		if (files.length === 0) {
 			new Notice(invalidCount
@@ -337,7 +362,7 @@ export default class YuqueSyncPlugin extends Plugin {
 		const confirmed = await ConfirmModal.show(
 			this.app,
 			'批量创建语雀文档？',
-			`将在 ${bookId} 中创建 ${files.length} 篇未关联文档。任务会串行执行，并为成功创建的文档写回 yuque_link。${invalidCount ? `\n另有 ${invalidCount} 篇文档因读取或 YAML 异常不会处理。` : ''}`,
+			`将创建 ${files.length} 篇未关联文档。插件会按容量自动选择或创建私密语雀知识库，任务串行执行，并为成功创建的文档写回 yuque_link。${invalidCount ? `\n另有 ${invalidCount} 篇文档因读取或 YAML 异常不会处理。` : ''}`,
 		);
 		if (!confirmed) {
 			return;
@@ -355,7 +380,7 @@ export default class YuqueSyncPlugin extends Plugin {
 					skipped += 1;
 					continue;
 				}
-				const result = await this.createYuqueDocumentForFile(file, bookId);
+				const result = await this.createYuqueDocumentForFile(file);
 				success += 1;
 				if (result.recovered) {
 					recovered += 1;
@@ -420,7 +445,7 @@ export default class YuqueSyncPlugin extends Plugin {
 		return !isYuqueSyncDisabled(frontmatter) && !getStringProperty(frontmatter, 'yuque_link');
 	}
 
-	private async createYuqueDocumentForFile(file: TFile, bookId: string): Promise<CreateDocumentResult> {
+	private async createYuqueDocumentForFile(file: TFile): Promise<CreateDocumentResult> {
 		const content = await this.app.vault.read(file);
 		const frontmatter = readFrontmatter(content);
 		if (isYuqueSyncDisabled(frontmatter)) {
@@ -435,11 +460,23 @@ export default class YuqueSyncPlugin extends Plugin {
 			return recovered;
 		}
 
-		const created = await this.client.createDocument(
-			bookId,
-			file.basename,
-			splitMarkdown(content).body,
-		);
+		let bookId = await this.bookPool.allocateBook();
+		let created;
+		try {
+			created = await this.client.createDocument(
+				bookId,
+				file.basename,
+				splitMarkdown(content).body,
+			);
+		} catch (error) {
+			if (!(await this.bookPool.shouldRerouteAfterCreateFailure(bookId, error))) throw error;
+			bookId = await this.bookPool.allocateBook();
+			created = await this.client.createDocument(
+				bookId,
+				file.basename,
+				splitMarkdown(content).body,
+			);
+		}
 		const yuqueLink = `https://www.yuque.com/${bookId}/${created.slug}`;
 		this.pluginSettings.pendingCreates[file.path] = {
 			yuqueLink,
@@ -447,6 +484,7 @@ export default class YuqueSyncPlugin extends Plugin {
 			createdAt: Date.now(),
 		};
 		await this.saveSettings();
+		await this.bookPool.recordDocumentCreated(bookId);
 
 		let latestContent: string;
 		try {
@@ -829,14 +867,6 @@ export default class YuqueSyncPlugin extends Plugin {
 		if (!this.pluginSettings.yuqueToken.trim()) {
 			throw new Error('请先在插件设置中配置 Yuque Token');
 		}
-	}
-
-	private requireDefaultBookId(): string {
-		const bookId = normalizeBookId(this.pluginSettings.defaultBookId);
-		if (!bookId) {
-			throw new Error('请在设置中填写格式为 namespace/book 的默认知识库');
-		}
-		return bookId;
 	}
 
 	private requireCookie(): void {

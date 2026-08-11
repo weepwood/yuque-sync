@@ -18,6 +18,8 @@ interface QueuedRequest {
 	operation: () => Promise<unknown>;
 	resolve: (value: unknown) => void;
 	reject: (reason: unknown) => void;
+	signal?: AbortSignal;
+	abortListener?: () => void;
 }
 
 interface HttpErrorLike {
@@ -88,6 +90,12 @@ function parseRetryAfterMs(error: unknown, now: number): number | null {
 	return null;
 }
 
+function createAbortError(): Error {
+	const error = new Error('操作已取消');
+	error.name = 'AbortError';
+	return error;
+}
+
 function normalizeLimit(value: number, fallback: number): number {
 	if (!Number.isFinite(value) || value < 1) {
 		return fallback;
@@ -102,6 +110,7 @@ export class YuqueApiRateLimiter {
 	private wakeTimer: number | null = null;
 	private wakeAt = 0;
 	private persistTimer: number | null = null;
+	private disposed = false;
 
 	constructor(
 		private readonly getSettings: () => YuqueSyncSettings,
@@ -111,15 +120,34 @@ export class YuqueApiRateLimiter {
 		this.pruneHistory(Date.now());
 	}
 
-	schedule<T>(operation: () => Promise<T>, priority: ApiRequestPriority = 'normal'): Promise<T> {
+	schedule<T>(
+		operation: () => Promise<T>,
+		priority: ApiRequestPriority = 'normal',
+		signal?: AbortSignal,
+	): Promise<T> {
+		if (this.disposed || signal?.aborted) {
+			return Promise.reject(createAbortError());
+		}
 		return new Promise<T>((resolve, reject) => {
-			this.queue.push({
+			let request: QueuedRequest;
+			const abortListener = () => {
+				const index = this.queue.indexOf(request);
+				if (index >= 0) {
+					this.queue.splice(index, 1);
+					reject(createAbortError());
+				}
+			};
+			request = {
 				priority: PRIORITY_WEIGHT[priority],
 				sequence: this.sequence,
 				operation,
 				resolve: (value) => resolve(value as T),
 				reject,
-			});
+				signal,
+				abortListener,
+			};
+			signal?.addEventListener('abort', abortListener, { once: true });
+			this.queue.push(request);
 			this.sequence += 1;
 			this.queue.sort((left, right) => left.priority - right.priority || left.sequence - right.sequence);
 			this.pump();
@@ -144,6 +172,23 @@ export class YuqueApiRateLimiter {
 		};
 	}
 
+	dispose(): void {
+		this.disposed = true;
+		if (this.wakeTimer !== null) {
+			window.clearTimeout(this.wakeTimer);
+			this.wakeTimer = null;
+			this.wakeAt = 0;
+		}
+		if (this.persistTimer !== null) {
+			window.clearTimeout(this.persistTimer);
+			this.persistTimer = null;
+		}
+		for (const request of this.queue.splice(0)) {
+			request.signal?.removeEventListener('abort', request.abortListener ?? (() => undefined));
+			request.reject(createAbortError());
+		}
+	}
+
 	async flush(): Promise<void> {
 		if (this.persistTimer !== null) {
 			window.clearTimeout(this.persistTimer);
@@ -154,7 +199,7 @@ export class YuqueApiRateLimiter {
 	}
 
 	private pump(): void {
-		if (this.queue.length === 0 || this.active >= MAX_ACTIVE_REQUESTS) {
+		if (this.disposed || this.queue.length === 0 || this.active >= MAX_ACTIVE_REQUESTS) {
 			return;
 		}
 
@@ -176,11 +221,16 @@ export class YuqueApiRateLimiter {
 			if (!request) {
 				return;
 			}
+			request.signal?.removeEventListener('abort', request.abortListener ?? (() => undefined));
+			if (request.signal?.aborted) {
+				request.reject(createAbortError());
+				continue;
+			}
 			this.recordDispatch(currentNow);
 			this.active += 1;
 			void request.operation()
 				.then(request.resolve, (error: unknown) => {
-					if (this.isRateLimitError(error)) {
+					if (!this.disposed && this.isRateLimitError(error)) {
 						this.pauseForRateLimit(error);
 					}
 					request.reject(error);
@@ -193,6 +243,7 @@ export class YuqueApiRateLimiter {
 	}
 
 	private pauseForRateLimit(error: unknown): void {
+		if (this.disposed) return;
 		const now = Date.now();
 		const settings = this.getSettings();
 		const retryAfterMs = parseRetryAfterMs(error, now) ?? DEFAULT_RATE_LIMIT_PAUSE_MS;
@@ -264,6 +315,7 @@ export class YuqueApiRateLimiter {
 	}
 
 	private scheduleWake(waitMs: number): void {
+		if (this.disposed) return;
 		const safeWait = Math.max(20, Math.ceil(waitMs));
 		const target = Date.now() + safeWait;
 		if (this.wakeTimer !== null && this.wakeAt <= target) {
@@ -281,7 +333,7 @@ export class YuqueApiRateLimiter {
 	}
 
 	private schedulePersist(): void {
-		if (this.persistTimer !== null) {
+		if (this.disposed || this.persistTimer !== null) {
 			return;
 		}
 		this.persistTimer = window.setTimeout(() => {
