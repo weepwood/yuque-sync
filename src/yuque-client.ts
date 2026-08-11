@@ -1,8 +1,14 @@
 import { requestUrl } from 'obsidian';
+import {
+	type ApiRateLimitSnapshot,
+	type ApiRequestPriority,
+	YuqueApiRateLimiter,
+} from './api-rate-limiter';
 import type {
 	CreatedYuqueDocument,
 	RemoteYuqueDocumentMeta,
 	YuqueDocument,
+	YuqueSyncSettings,
 } from './types';
 
 interface YuqueEnvelope<T> {
@@ -19,19 +25,31 @@ interface YuqueDocumentPayload {
 
 const DOCUMENT_LIST_PAGE_SIZE = 100;
 const MAX_DOCUMENT_LIST_PAGES = 500;
+const MAX_RATE_LIMIT_RETRIES = 3;
 
 export class YuqueClient {
+	private readonly rateLimiter: YuqueApiRateLimiter;
+
 	constructor(
 		private readonly getToken: () => string,
 		private readonly getCookie: () => string,
-	) {}
+		getSettings: () => YuqueSyncSettings,
+		saveSettings: () => Promise<void>,
+		setStatus: (text: string) => void,
+	) {
+		this.rateLimiter = new YuqueApiRateLimiter(getSettings, saveSettings, setStatus);
+	}
 
-	async getDocument(bookId: string, slug: string): Promise<YuqueDocument> {
-		const response = await requestUrl({
+	async getDocument(
+		bookId: string,
+		slug: string,
+		priority: ApiRequestPriority = 'high',
+	): Promise<YuqueDocument> {
+		const response = await this.requestOpenApi(() => requestUrl({
 			url: `${this.apiBase(bookId)}/docs/${encodeURIComponent(slug)}`,
 			method: 'GET',
 			headers: this.authHeaders(),
-		});
+		}), priority);
 		const payload = response.json as YuqueEnvelope<YuqueDocumentPayload>;
 		return {
 			title: payload.data.title ?? '',
@@ -40,17 +58,20 @@ export class YuqueClient {
 		};
 	}
 
-	async listDocuments(bookId: string): Promise<RemoteYuqueDocumentMeta[]> {
+	async listDocuments(
+		bookId: string,
+		priority: ApiRequestPriority = 'low',
+	): Promise<RemoteYuqueDocumentMeta[]> {
 		const results: RemoteYuqueDocumentMeta[] = [];
 		const seen = new Set<string>();
 		let offset = 0;
 
 		for (let page = 0; page < MAX_DOCUMENT_LIST_PAGES; page += 1) {
-			const response = await requestUrl({
+			const response = await this.requestOpenApi(() => requestUrl({
 				url: `${this.apiBase(bookId)}/docs?offset=${offset}&limit=${DOCUMENT_LIST_PAGE_SIZE}`,
 				method: 'GET',
 				headers: this.authHeaders(),
-			});
+			}), priority);
 			const payload = response.json as YuqueEnvelope<YuqueDocumentPayload[]>;
 			if (!Array.isArray(payload.data)) {
 				throw new Error('语雀文档列表接口返回了未知数据格式');
@@ -83,7 +104,7 @@ export class YuqueClient {
 	}
 
 	async updateDocument(bookId: string, slug: string, title: string, content: string): Promise<string> {
-		const response = await requestUrl({
+		const response = await this.requestOpenApi(() => requestUrl({
 			url: `${this.apiBase(bookId)}/docs/${encodeURIComponent(slug)}`,
 			method: 'PUT',
 			headers: this.authHeaders(),
@@ -93,13 +114,13 @@ export class YuqueClient {
 				format: 'markdown',
 				body: content,
 			}),
-		});
+		}), 'high');
 		const payload = response.json as Partial<YuqueEnvelope<YuqueDocumentPayload>>;
 		return payload.data?.updated_at ?? '';
 	}
 
 	async createDocument(bookId: string, title: string, content: string): Promise<CreatedYuqueDocument> {
-		const response = await requestUrl({
+		const response = await this.requestOpenApi(() => requestUrl({
 			url: `${this.apiBase(bookId)}/docs`,
 			method: 'POST',
 			headers: this.authHeaders(),
@@ -109,7 +130,7 @@ export class YuqueClient {
 				format: 'markdown',
 				body: content,
 			}),
-		});
+		}), 'high');
 		const payload = response.json as YuqueEnvelope<YuqueDocumentPayload>;
 		if (!payload.data?.id || !payload.data.slug) {
 			throw new Error('语雀创建文档接口未返回文档 ID 或 slug');
@@ -123,7 +144,7 @@ export class YuqueClient {
 
 	async addDocumentToToc(bookId: string, documentId: number): Promise<boolean> {
 		try {
-			await requestUrl({
+			await this.requestOpenApi(() => requestUrl({
 				url: `${this.apiBase(bookId)}/toc`,
 				method: 'PUT',
 				headers: this.authHeaders(),
@@ -133,7 +154,7 @@ export class YuqueClient {
 					type: 'DOC',
 					doc_ids: [documentId],
 				}),
-			});
+			}), 'normal');
 			return true;
 		} catch (error) {
 			console.error('[Yuque Sync] 文档已创建，但加入目录失败', error);
@@ -174,6 +195,30 @@ export class YuqueClient {
 			throw new Error('语雀图片接口未返回图片地址');
 		}
 		return payload.data.url;
+	}
+
+	getRateLimitSnapshot(): ApiRateLimitSnapshot {
+		return this.rateLimiter.getSnapshot();
+	}
+
+	async flushRateLimiter(): Promise<void> {
+		await this.rateLimiter.flush();
+	}
+
+	private async requestOpenApi<T>(
+		operation: () => Promise<T>,
+		priority: ApiRequestPriority,
+	): Promise<T> {
+		for (let attempt = 0; ; attempt += 1) {
+			try {
+				return await this.rateLimiter.schedule(operation, priority);
+			} catch (error) {
+				const rateLimited = this.rateLimiter.observeRateLimit(error);
+				if (!rateLimited || attempt >= MAX_RATE_LIMIT_RETRIES) {
+					throw error;
+				}
+			}
+		}
 	}
 
 	private apiBase(bookId: string): string {
