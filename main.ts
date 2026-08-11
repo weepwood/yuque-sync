@@ -29,6 +29,7 @@ import {
 	DEFAULT_SETTINGS,
 	type ImageReference,
 	type ScanMode,
+	type SyncStatus,
 	type YuqueSyncSettings,
 } from './src/types';
 import { YuqueClient } from './src/yuque-client';
@@ -159,6 +160,8 @@ export default class YuqueSyncPlugin extends Plugin {
 		if (this.statusTimer !== null) {
 			window.clearTimeout(this.statusTimer);
 		}
+		this.syncEngine?.dispose();
+		this.client?.dispose();
 		void this.syncEngine?.flush();
 		void this.client?.flushRateLimiter();
 	}
@@ -221,6 +224,11 @@ export default class YuqueSyncPlugin extends Plugin {
 		try {
 			await operation();
 		} catch (error) {
+			if (error instanceof Error && error.name === 'AbortError') {
+				new Notice('语雀同步任务已暂停');
+				this.setStatus('同步任务已暂停', 3000);
+				return;
+			}
 			console.error('[Yuque Sync] 操作失败', error);
 			const message = describeError(error);
 			new Notice(`语雀同步失败：${message}`);
@@ -252,28 +260,37 @@ export default class YuqueSyncPlugin extends Plugin {
 			if (!location) {
 				throw new Error('yuque_link 不是有效的语雀文档地址');
 			}
+
+			const firstCheck = await this.syncEngine.prepareUpload(file, yuqueLink);
+			const riskyStatuses = new Set<SyncStatus>(['remote-changed', 'conflict', 'different']);
+			const risky = riskyStatuses.has(firstCheck.status);
+			const descriptions: Partial<Record<SyncStatus, string>> = {
+				'remote-changed': '语雀正文已相对最近同步基线发生变化，而本地正文没有对应修改。强制上传会丢失语雀端修改。',
+				conflict: '本地与语雀正文都已相对最近同步基线发生变化。强制上传会丢失语雀端修改。',
+				different: '两端正文不同，但尚未建立可靠的最近同步基线，无法自动判断正确同步方向。',
+				'local-changed': '仅检测到本地正文变化，可以上传到语雀。',
+				synced: '当前本地与语雀正文一致。继续上传会刷新语雀标题与更新时间。',
+			};
 			const confirmed = await ConfirmModal.show(
 				this.app,
-				'上传到语雀？',
-				`将使用本地内容覆盖语雀文档：${file.basename}`,
+				risky ? '检测到远端修改，仍要强制覆盖？' : '上传到语雀？',
+				`${descriptions[firstCheck.status] ?? firstCheck.detail ?? '已完成上传前同步状态检查'}\n文档：${file.basename}`,
 			);
-			if (!confirmed) {
-				return;
-			}
+			if (!confirmed) return;
 
-			const latestContent = await this.app.vault.read(file);
-			const latestLink = getStringProperty(readFrontmatter(latestContent), 'yuque_link');
-			if (latestLink !== yuqueLink) {
-				throw new Error('确认期间 yuque_link 已发生变化，请重新执行上传');
+			// 确认窗口停留期间远端可能再次变化，因此写入前再做一次短检查。
+			const finalCheck = await this.syncEngine.prepareUpload(file, yuqueLink);
+			if (finalCheck.remoteHash !== firstCheck.remoteHash) {
+				throw new Error('确认期间语雀文档又发生了变化，为避免覆盖新内容，本次上传已取消');
 			}
 			const updatedAt = await this.client.updateDocument(
 				location.bookId,
 				location.slug,
 				file.basename,
-				splitMarkdown(latestContent).body,
+				splitMarkdown(finalCheck.content).body,
 			);
-			await this.syncEngine.recordSynchronized(file, yuqueLink, latestContent, updatedAt);
-			new Notice('文档已上传到语雀');
+			await this.syncEngine.recordSynchronized(file, yuqueLink, finalCheck.content, updatedAt);
+			new Notice(risky ? '文档已在确认冲突风险后强制上传到语雀' : '文档已上传到语雀');
 			this.setStatus('文档上传完成', 3000);
 			return;
 		}

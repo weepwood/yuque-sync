@@ -44,12 +44,13 @@ export class YuqueClient {
 		bookId: string,
 		slug: string,
 		priority: ApiRequestPriority = 'high',
+		signal?: AbortSignal,
 	): Promise<YuqueDocument> {
 		const response = await this.requestOpenApi(() => requestUrl({
 			url: `${this.apiBase(bookId)}/docs/${encodeURIComponent(slug)}`,
 			method: 'GET',
 			headers: this.authHeaders(),
-		}), priority);
+		}), priority, signal);
 		const payload = response.json as YuqueEnvelope<YuqueDocumentPayload>;
 		return {
 			title: payload.data.title ?? '',
@@ -61,6 +62,7 @@ export class YuqueClient {
 	async listDocuments(
 		bookId: string,
 		priority: ApiRequestPriority = 'low',
+		signal?: AbortSignal,
 	): Promise<RemoteYuqueDocumentMeta[]> {
 		const results: RemoteYuqueDocumentMeta[] = [];
 		const seen = new Set<string>();
@@ -71,7 +73,7 @@ export class YuqueClient {
 				url: `${this.apiBase(bookId)}/docs?offset=${offset}&limit=${DOCUMENT_LIST_PAGE_SIZE}`,
 				method: 'GET',
 				headers: this.authHeaders(),
-			}), priority);
+			}), priority, signal);
 			const payload = response.json as YuqueEnvelope<YuqueDocumentPayload[]>;
 			if (!Array.isArray(payload.data)) {
 				throw new Error('语雀文档列表接口返回了未知数据格式');
@@ -201,6 +203,10 @@ export class YuqueClient {
 		return this.rateLimiter.getSnapshot();
 	}
 
+	dispose(): void {
+		this.rateLimiter.dispose();
+	}
+
 	async flushRateLimiter(): Promise<void> {
 		await this.rateLimiter.flush();
 	}
@@ -208,10 +214,11 @@ export class YuqueClient {
 	private async requestOpenApi<T>(
 		operation: () => Promise<T>,
 		priority: ApiRequestPriority,
+		signal?: AbortSignal,
 	): Promise<T> {
 		for (let attempt = 0; ; attempt += 1) {
 			try {
-				return await this.rateLimiter.schedule(operation, priority);
+				return await this.rateLimiter.schedule(operation, priority, signal);
 			} catch (error) {
 				if (!this.rateLimiter.isRateLimitError(error) || attempt >= MAX_RATE_LIMIT_RETRIES) {
 					throw error;
